@@ -166,6 +166,12 @@ fn run() -> Result<(), String> {
             sum(&|r| r.3 as f64)
         );
     }
+    if args.iter().any(|a| a == "--cch") {
+        cch_check(&net, &pairs, &ours);
+    }
+    if args.iter().any(|a| a == "--weights") {
+        weights_check(&net, db.as_ref(), &mode, &pairs)?;
+    }
     let ids = &net.graph.ids;
     if let Some(dir) = args.iter().position(|a| a == "--files").and_then(|i| args.get(i + 1)) {
         // the routes from the tile files must equal the routes in memory: the same cost, and a path of that cost
@@ -437,5 +443,118 @@ fn route_files(args: &[String]) -> Result<(), String> {
         std::fs::write(path, w).map_err(|e| format!("{path}: {e}"))?;
     }
     println!("files mapped: {}; peak memory of this process: {:.1} MB ({})", store.mapped.load(std::sync::atomic::Ordering::Relaxed), disk::peak_rss() as f64 / 1e6, proc_memory());
+    Ok(())
+}
+
+/// `check --cch`: the structure with no costs and its customization (`tileroute::cch`), against the routes of the
+/// hierarchy: the same cost for each pair, and a path of that cost.
+fn cch_check(net: &load::Network, pairs: &[(u32, u32)], ours: &[Option<(f64, Vec<u32>)>]) {
+    use tileroute::cch::Cch;
+    let n = net.graph.n_nodes();
+    let t = Instant::now();
+    let c = Cch::new(n, net.turns.iter().map(|a| (a.0, a.1)), &net.level, &net.cell);
+    let t_struct = t.elapsed().as_secs_f64();
+    let m = c.customize(&net.turns, !std::env::args().any(|a| a == "--no-reduce"));
+    println!(
+        "cch: structure {:.2} s ({} edges, elimination tree depth {}, {:.0} MB); customization: triangles {:.2} s, arc reduction and mask {:.2} s ({} -> {} search arcs, {:.0} MB for this metric)",
+        t_struct,
+        c.n_edges(),
+        c.max_depth(),
+        c.bytes() as f64 / 1e6,
+        m.times.0,
+        m.times.1,
+        m.before,
+        m.n_search_arcs(),
+        m.bytes() as f64 / 1e6
+    );
+    let weight: std::collections::HashMap<(u32, u32), f64> = net.turns.iter().map(|a| ((a.0, a.1), a.2)).collect();
+    let (mut same, mut tie, mut wrong) = (0usize, 0usize, 0usize);
+    let (mut settled, mut relaxed) = (0usize, 0usize);
+    for (&(s, t), o) in pairs.iter().zip(ours) {
+        let (r, st) = m.route(s, t);
+        settled += st.settled;
+        relaxed += st.relaxed;
+        match (&r, o) {
+            (None, None) => same += 1,
+            (Some((d, p)), Some((od, op))) if d == od => {
+                let own = p.windows(2).map(|w| weight.get(&(w[0], w[1])).copied()).try_fold(0.0, |s, c| c.map(|c| s + c));
+                if own != Some(*d) {
+                    wrong += 1;
+                } else if p == op {
+                    same += 1;
+                } else {
+                    tie += 1;
+                }
+            }
+            _ => wrong += 1,
+        }
+    }
+    let k = pairs.len().max(1);
+    let t = Instant::now();
+    for &(s, t) in pairs {
+        std::hint::black_box(m.route(s, t));
+    }
+    println!(
+        "cch against the hierarchy: {} pairs | same {same} | tie {tie} | wrong {wrong} | {:.3} ms per query (one thread), {} settled, {} arcs opened",
+        pairs.len(),
+        t.elapsed().as_secs_f64() / k as f64 * 1e3,
+        settled / k,
+        relaxed / k
+    );
+}
+
+/// `check --weights`: is the best of the routes of single costs (time, length) a good estimate of the best route for a
+/// mix of them? For each mix: cost = l * time / mean time + (1 - l) * length / mean length, with the exact route from
+/// a customization of that mix.
+fn weights_check(net: &load::Network, db: &std::path::Path, mode: &str, pairs: &[(u32, u32)]) -> Result<(), String> {
+    use tileroute::cch::Cch;
+    // the length of an arc: the length of its first road edge (duckOSM's cost is the time of the first road edge)
+    let con = load::open(db)?;
+    let mut st = con.prepare(&format!("SELECT edge_id, length_m::DOUBLE FROM {mode}.edges")).map_err(|e| e.to_string())?;
+    let mut rows = st.query([]).map_err(|e| e.to_string())?;
+    let mut len_of = vec![0.0f64; net.graph.n_nodes()];
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let id: i64 = r.get(0).map_err(|e| e.to_string())?;
+        if let Some(i) = net.graph.index_of(id) {
+            len_of[i] = r.get::<_, Option<f64>>(1).map_err(|e| e.to_string())?.unwrap_or(0.0);
+        }
+    }
+    let time = net.turns.clone();
+    let length: Vec<(u32, u32, f64)> = time.iter().map(|&(u, w, _)| (u, w, len_of[u as usize])).collect();
+    let k = time.len() as f64;
+    let (mt, ml) = (time.iter().map(|a| a.2).sum::<f64>() / k, length.iter().map(|a| a.2).sum::<f64>() / k);
+    let mix = |l: f64| -> Vec<(u32, u32, f64)> { time.iter().zip(&length).map(|(a, b)| (a.0, a.1, l * a.2 / mt + (1.0 - l) * b.2 / ml)).collect() };
+    let weight: std::collections::HashMap<(u32, u32), (f64, f64)> = time.iter().zip(&length).map(|(a, b)| ((a.0, a.1), (a.2, b.2))).collect();
+    let c = Cch::new(net.graph.n_nodes(), time.iter().map(|a| (a.0, a.1)), &net.level, &net.cell);
+    let t = Instant::now();
+    let candidates = [c.customize(&time, true), c.customize(&length, true), c.customize(&mix(0.5), true)];
+    println!("weights: 3 candidate metrics (time, length, 50/50 mix) customized in {:.1} s", t.elapsed().as_secs_f64());
+    let routes: Vec<Vec<Option<Vec<u32>>>> = candidates.iter().map(|m| pairs.par_iter().map(|&(s, t)| m.route(s, t).0.map(|r| r.1)).collect()).collect();
+    println!("{:>5} | {:>28} | {:>28}", "l", "best of time, length", "best of time, length, 50/50");
+    println!("{:>5} | {:>8} {:>9} {:>9} | {:>8} {:>9} {:>9}", "", "exact", "mean err", "max err", "exact", "mean err", "max err");
+    for l in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] {
+        let m = c.customize(&mix(l), true);
+        let cost_of = |p: &Vec<u32>| p.windows(2).map(|w| { let (a, b) = weight[&(w[0], w[1])]; l * a / mt + (1.0 - l) * b / ml }).sum::<f64>();
+        let mut out = String::new();
+        for kk in [2usize, 3] {
+            let (mut n, mut exact, mut sum, mut max) = (0usize, 0usize, 0.0f64, 0.0f64);
+            for (i, &(s, t)) in pairs.iter().enumerate() {
+                let Some((best, _)) = m.route(s, t).0 else { continue };
+                let est = routes[..kk].iter().filter_map(|r| r[i].as_ref()).map(cost_of).fold(f64::INFINITY, f64::min);
+                if best <= 0.0 {
+                    continue;
+                }
+                let err = (est - best) / best;
+                n += 1;
+                if err <= 1e-9 {
+                    exact += 1;
+                }
+                sum += err.max(0.0);
+                max = max.max(err);
+            }
+            out += &format!(" | {:>7.1}% {:>8.3}% {:>8.2}%", exact as f64 * 100.0 / n.max(1) as f64, sum * 100.0 / n.max(1) as f64, max * 100.0);
+        }
+        println!("{l:>5.1}{out}");
+    }
     Ok(())
 }

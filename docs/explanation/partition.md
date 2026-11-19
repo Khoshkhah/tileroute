@@ -241,7 +241,7 @@ builds on the cells, and in how the query uses them.
 3. **Edge-based graph.** In tileroute a turn cost is an arc. CCH and MLD need more work for turns.
 4. **Saved paths.** The unpack is fast, but the saved paths use memory.
 
-**What tileroute can take from them:**
+**What tileroute can take from them** (the CCH idea is now measured: [A structure with no costs](customization.md)):
 
 | From | Idea | Gain | Cost |
 |---|---|---|---|

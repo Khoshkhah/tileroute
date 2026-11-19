@@ -60,6 +60,7 @@ nav:
       - Updates (new costs): explanation/updates.md
       - The preparation tile by tile: explanation/build-by-tile.md
       - Cells from the graph (partition): explanation/partition.md
+      - A structure with no costs (customization): explanation/customization.md
       - The whole world (distributed): explanation/distributed.md
       - Weights (many items): explanation/weights.md
       - Modes: explanation/modes.md

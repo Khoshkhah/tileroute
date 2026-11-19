@@ -25,6 +25,7 @@ graph in memory, also in the browser.
 | Why and how the hierarchy is stored in tile files | [Tile files](explanation/tile-files.md) |
 | What the top-down phase gives | [The top-down phase](explanation/top-down.md) |
 | How to update the shortcuts after new costs | [Updates](explanation/updates.md) |
+| How new costs are added fast, with one structure for many costs | [A structure with no costs](explanation/customization.md) |
 | How a large area is prepared with little memory | [The preparation tile by tile](explanation/build-by-tile.md) |
 | How the whole world can run on many servers | [The whole world (distributed)](explanation/distributed.md) |
 | How a query uses its own weights for many items | [Weights](explanation/weights.md) |
