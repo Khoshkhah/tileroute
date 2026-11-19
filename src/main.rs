@@ -55,6 +55,13 @@ fn run() -> Result<(), String> {
         }
     }
 
+    let (k, sum) = h.inner.iter().fold((0u64, 0u64), |a, x| (a.0 + x.0, a.1 + x.1));
+    println!("inner nodes of a shortcut path: mean {:.2} over {k} pairs, largest {}", sum as f64 / k.max(1) as f64, h.inner.iter().map(|x| x.2).max().unwrap_or(0));
+    for (z, &(k, sum, max)) in h.inner.iter().enumerate() {
+        if k > 0 {
+            println!("  zoom {z:2}: mean {:.2}, largest {max}", sum as f64 / k as f64);
+        }
+    }
     // what a query server keeps: the hierarchy and the edge ids (8 bytes and about 16 bytes of index for each node)
     let ids_bytes = n * 8 + n * 16;
     println!(

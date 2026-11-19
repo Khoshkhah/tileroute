@@ -90,6 +90,8 @@ pub struct Hierarchy {
     /// every shortcut pair `(u, w, zoom, tile)` that a step made, also when an arc `u -> w` was cheaper: the pairs depend
     /// only on the network, so a rebuild with new costs uses the same list
     pub pairs: Vec<(u32, u32, u8, u64)>,
+    /// for each zoom: (shortcut pairs, the sum of their inner nodes, the largest number of inner nodes)
+    pub inner: Vec<(u64, u64, u32)>,
 }
 
 /// What one search found: the labels (distance, parent) of each direction, the best meeting node, and the tiles (cells)
@@ -117,6 +119,7 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
     let mut shortcuts = vec![0usize; top as usize + 1];
     let mut steps = vec![(0usize, 0.0f64, 0.0f64); top as usize + 1];
     let mut pairs = Vec::new();
+    let mut inner = vec![(0u64, 0u64, 0u32); top as usize + 1];
     for z in (1..=top).rev() {
         let mut sets: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
         for v in 0..n {
@@ -124,7 +127,7 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
                 sets.entry(cell[v]).or_default().push(v as u32);
             }
         }
-        let made: Vec<(u64, Vec<(u32, u32, f64)>, f64)> = sets
+        let made: Vec<(u64, Vec<(u32, u32, f64, u32)>, f64)> = sets
             .par_iter()
             .map(|(&t, xs)| {
                 let t0 = std::time::Instant::now();
@@ -137,7 +140,10 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
             st.0 += 1;
             st.1 += secs;
             st.2 = st.2.max(secs);
-            for (u, w, c) in rows {
+            for (u, w, c, k) in rows {
+                inner[z as usize].0 += 1;
+                inner[z as usize].1 += k as u64;
+                inner[z as usize].2 = inner[z as usize].2.max(k);
                 pairs.push((u, w, z, t));
                 shortcuts[z as usize] += 1;
                 let new = Arc { cost: c, zoom: z, tile: t };
@@ -172,7 +178,7 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
             }
         }
     }
-    Hierarchy { all: Csr::new(n, all), up: Csr::new(n, up), down: Csr::new(n, down), level, cell, shortcuts, steps, pairs }
+    Hierarchy { all: Csr::new(n, all), up: Csr::new(n, up), down: Csr::new(n, down), level, cell, shortcuts, steps, pairs, inner }
 }
 
 /// The shortcuts over the set `xs` (level `z`, cell `t`): for each node `u` with a turn into the set, a Dijkstra in the
@@ -187,23 +193,25 @@ fn contract(
     z: u8,
     t: u64,
     xs: &[u32],
-) -> Vec<(u32, u32, f64)> {
+) -> Vec<(u32, u32, f64, u32)> {
     let in_set = |v: u32| level[v as usize] == z && cell[v as usize] == t;
     let sources: BTreeSet<u32> =
         xs.iter().flat_map(|&x| inn[x as usize].iter().copied()).filter(|&u| alive[u as usize] && !in_set(u)).collect();
     let mut out = Vec::new();
     for u in sources {
-        let mut dist: HashMap<u32, f64> = HashMap::new();
+        // dist: (cost, number of inner nodes on the path so far)
+        let mut dist: HashMap<u32, (f64, u32)> = HashMap::new();
         let mut heap = BinaryHeap::new();
         for (&x, a) in &arcs[u as usize] {
-            if in_set(x) && dist.get(&x).is_none_or(|&d| a.cost < d) {
-                dist.insert(x, a.cost);
+            if in_set(x) && dist.get(&x).is_none_or(|&(d, _)| a.cost < d) {
+                dist.insert(x, (a.cost, 1));
                 heap.push(Key(a.cost, x));
             }
         }
-        let mut to: BTreeMap<u32, f64> = BTreeMap::new();
+        let mut to: BTreeMap<u32, (f64, u32)> = BTreeMap::new();
         while let Some(Key(d, x)) = heap.pop() {
-            if d > dist[&x] {
+            let (dx, kx) = dist[&x];
+            if d > dx {
                 continue;
             }
             for (&y, a) in &arcs[x as usize] {
@@ -212,16 +220,16 @@ fn contract(
                 }
                 let nd = d + a.cost;
                 if in_set(y) {
-                    if dist.get(&y).is_none_or(|&e| nd < e) {
-                        dist.insert(y, nd);
+                    if dist.get(&y).is_none_or(|&(e, _)| nd < e) {
+                        dist.insert(y, (nd, kx + 1));
                         heap.push(Key(nd, y));
                     }
-                } else if y != u && to.get(&y).is_none_or(|&e| nd < e) {
-                    to.insert(y, nd);
+                } else if y != u && to.get(&y).is_none_or(|&(e, _)| nd < e) {
+                    to.insert(y, (nd, kx));
                 }
             }
         }
-        out.extend(to.into_iter().map(|(w, c)| (u, w, c)));
+        out.extend(to.into_iter().map(|(w, (c, k))| (u, w, c, k)));
     }
     out
 }
