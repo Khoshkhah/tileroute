@@ -24,11 +24,11 @@ mod write;
 
 /// An arc: its cost, and for a shortcut where its inner nodes are in `Hierarchy::paths`.
 #[derive(Clone, Copy, Debug)]
-struct Arc {
-    cost: f64,
+pub(crate) struct Arc {
+    pub(crate) cost: f64,
     /// a shortcut: its inner nodes are `inner[start..start + len]`; an arc of the input graph: `len` = 0
-    start: u32,
-    len: u32,
+    pub(crate) start: u32,
+    pub(crate) len: u32,
 }
 
 /// The arcs of each node in flat arrays, sorted by the other node.
@@ -58,9 +58,9 @@ impl Csr {
 }
 
 /// The arcs of the search, each node's arcs together: (cost, other node) in one array, so a search reads one stream.
-struct Fast {
-    off: Vec<u32>,
-    arc: Vec<(f64, u32)>,
+pub(crate) struct Fast {
+    pub(crate) off: Vec<u32>,
+    pub(crate) arc: Vec<(f64, u32)>,
 }
 
 impl Fast {
@@ -68,7 +68,7 @@ impl Fast {
         Fast { off: c.off.clone(), arc: c.other.iter().zip(&c.arc).map(|(&w, a)| (a.cost, w)).collect() }
     }
 
-    fn of(&self, v: u32) -> &[(f64, u32)] {
+    pub(crate) fn of(&self, v: u32) -> &[(f64, u32)] {
         &self.arc[self.off[v as usize] as usize..self.off[v as usize + 1] as usize]
     }
 }
@@ -76,13 +76,18 @@ impl Fast {
 /// Arc reduction of a search graph: remove the arc `u -> w` (cost c) when another path from u to w in the same search
 /// graph costs c or less. A search then finds that path in place of the arc, so the routes stay exact; the unpack data
 /// (`Hierarchy::all`) keeps every arc.
-fn reduce(g: Fast) -> Fast {
+pub(crate) fn reduce(g: Fast) -> Fast {
+    reduce_from(g, 0)
+}
+
+/// [`reduce`] for the rows `from..` only; the rows before `from` stay as they are (they are still used as witnesses).
+pub(crate) fn reduce_from(g: Fast, from: usize) -> Fast {
     let n = g.off.len() - 1;
     let keep: Vec<Vec<bool>> = (0..n as u32)
         .into_par_iter()
         .map(|u| {
             let arcs = g.of(u);
-            if arcs.len() < 2 {
+            if arcs.len() < 2 || (u as usize) < from {
                 return vec![true; arcs.len()];
             }
             let limit = arcs.iter().map(|a| a.0).fold(0.0, f64::max);
@@ -255,59 +260,10 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: 
     }
     let mut alive = vec![true; n];
     let top = level.iter().copied().max().unwrap_or(0);
-    let mut shortcuts = vec![0usize; top as usize + 1];
-    let mut steps = vec![(0usize, 0.0f64, 0.0f64); top as usize + 1];
-    let mut pairs = Vec::new();
-    let mut inner = vec![(0u64, 0u64, 0u32); top as usize + 1];
-    // the inner nodes of all kept shortcuts, one after the other
+    let mut st = Steps::new(top, true);
     let mut paths: Vec<u32> = Vec::new();
-    let mut witnessed = vec![0usize; top as usize + 1];
-    for z in (core.max(0) + 1..=top).rev() {
-        let mut sets: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
-        for v in 0..n {
-            if level[v] == z {
-                sets.entry(cell[v]).or_default().push(v as u32);
-            }
-        }
-        let made: Vec<(u64, Vec<(u32, u32, f64, Vec<u32>, bool)>, f64)> = sets
-            .par_iter()
-            .map(|(&t, xs)| {
-                let t0 = std::time::Instant::now();
-                let rows = contract(&arcs, &inn, &alive, &level, &cell, z, t, xs);
-                (t, rows, t0.elapsed().as_secs_f64())
-            })
-            .collect();
-        for (t, rows, secs) in made {
-            let st = &mut steps[z as usize];
-            st.0 += 1;
-            st.1 += secs;
-            st.2 = st.2.max(secs);
-            for (u, w, c, p, needed) in rows {
-                let k = p.len() as u32;
-                inner[z as usize].0 += 1;
-                inner[z as usize].1 += k as u64;
-                inner[z as usize].2 = inner[z as usize].2.max(k);
-                pairs.push((u, w, z, t));
-                shortcuts[z as usize] += 1;
-                if !needed {
-                    witnessed[z as usize] += 1;
-                }
-                let keep = needed && arcs[u as usize].get(&w).is_none_or(|a| c < a.cost);
-                if keep {
-                    let new = Arc { cost: c, start: paths.len() as u32, len: k };
-                    paths.extend(p);
-                    if arcs[u as usize].insert(w, new).is_none() {
-                        inn[w as usize].push(u);
-                    }
-                }
-            }
-        }
-        for xs in sets.values() {
-            for &x in xs {
-                alive[x as usize] = false;
-            }
-        }
-    }
+    run_steps(&mut arcs, &mut inn, &mut alive, &level, &cell, (core.max(0) + 1..=top).rev(), &mut paths, &mut st);
+    let Steps { shortcuts, steps, pairs, inner, witnessed, .. } = st;
     // the core: with `core_ch`, a classic contraction hierarchy (one node at a time, by importance) gives each core node
     // its own rank; without it, all core nodes count as the same level
     let rank: HashMap<u32, u32> = if core_ch && core > 0 {
@@ -368,6 +324,88 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: 
         witnessed,
         to_new,
         to_old: order,
+    }
+}
+
+/// The counts of the steps, for each zoom (see the fields of `Hierarchy`).
+pub(crate) struct Steps {
+    pub shortcuts: Vec<usize>,
+    pub steps: Vec<(usize, f64, f64)>,
+    pub pairs: Vec<(u32, u32, u8, u64)>,
+    pub inner: Vec<(u64, u64, u32)>,
+    pub witnessed: Vec<usize>,
+    /// keep the list of all shortcut pairs (for a rebuild); the preparation tile by tile does not keep it
+    keep_pairs: bool,
+}
+
+impl Steps {
+    pub(crate) fn new(top: u8, keep_pairs: bool) -> Steps {
+        let k = top as usize + 1;
+        Steps { shortcuts: vec![0; k], steps: vec![(0, 0.0, 0.0); k], pairs: Vec::new(), inner: vec![(0, 0, 0); k], witnessed: vec![0; k], keep_pairs }
+    }
+}
+
+/// The steps of the zooms `zooms` (the finest first): for each zoom, the sets of all its tiles in parallel, then their
+/// shortcuts. `arcs`, `inn`, `alive` and `paths` change; the counts go to `st`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_steps(
+    arcs: &mut [HashMap<u32, Arc>],
+    inn: &mut [Vec<u32>],
+    alive: &mut [bool],
+    level: &[u8],
+    cell: &[u64],
+    zooms: impl Iterator<Item = u8>,
+    paths: &mut Vec<u32>,
+    st: &mut Steps,
+) {
+    let n = level.len();
+    for z in zooms {
+        let mut sets: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
+        for v in 0..n {
+            if level[v] == z && alive[v] {
+                sets.entry(cell[v]).or_default().push(v as u32);
+            }
+        }
+        let made: Vec<(u64, Vec<(u32, u32, f64, Vec<u32>, bool)>, f64)> = sets
+            .par_iter()
+            .map(|(&t, xs)| {
+                let t0 = std::time::Instant::now();
+                let rows = contract(arcs, inn, alive, level, cell, z, t, xs);
+                (t, rows, t0.elapsed().as_secs_f64())
+            })
+            .collect();
+        for (t, rows, secs) in made {
+            let s = &mut st.steps[z as usize];
+            s.0 += 1;
+            s.1 += secs;
+            s.2 = s.2.max(secs);
+            for (u, w, c, p, needed) in rows {
+                let k = p.len() as u32;
+                st.inner[z as usize].0 += 1;
+                st.inner[z as usize].1 += k as u64;
+                st.inner[z as usize].2 = st.inner[z as usize].2.max(k);
+                if st.keep_pairs {
+                    st.pairs.push((u, w, z, t));
+                }
+                st.shortcuts[z as usize] += 1;
+                if !needed {
+                    st.witnessed[z as usize] += 1;
+                }
+                let keep = needed && arcs[u as usize].get(&w).is_none_or(|a| c < a.cost);
+                if keep {
+                    let new = Arc { cost: c, start: paths.len() as u32, len: k };
+                    paths.extend(p);
+                    if arcs[u as usize].insert(w, new).is_none() {
+                        inn[w as usize].push(u);
+                    }
+                }
+            }
+        }
+        for xs in sets.values() {
+            for &x in xs {
+                alive[x as usize] = false;
+            }
+        }
     }
 }
 

@@ -58,6 +58,7 @@ nav:
       - Tile files: explanation/tile-files.md
       - The top-down phase: explanation/top-down.md
       - Updates (new costs): explanation/updates.md
+      - The preparation tile by tile: explanation/build-by-tile.md
       - Weights (many items): explanation/weights.md
       - Modes: explanation/modes.md
       - Timetable: explanation/timetable.md

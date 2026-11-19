@@ -263,10 +263,22 @@ fn arg<'a>(args: &'a [String], name: &str) -> Option<&'a String> {
 
 /// `tileroute build <db.duckdb> -o <folder> [--mode driving] [--finest 20]`
 fn build(args: &[String]) -> Result<(), String> {
-    let usage = "usage: tileroute build <db.duckdb> -o <folder> [--mode driving] [--finest 20]";
+    let usage = "usage: tileroute build <db.duckdb> -o <folder> [--mode driving] [--finest 20] [--by-tile]";
     let (Some(db), Some(dir)) = (args.get(1), arg(args, "-o")) else { return Err(usage.into()) };
     let mode = arg(args, "--mode").map_or("driving", |s| s.as_str());
     let finest: u8 = arg(args, "--finest").map_or(Ok(20), |s| s.parse()).map_err(|e| format!("--finest: {e}"))?;
+    if args.iter().any(|a| a == "--by-tile") {
+        let r = tileroute::bytile::build(db.as_ref(), mode, finest, dir.as_ref())?;
+        println!(
+            "built tile by tile: {} nodes ({} in the top), {} arcs, {} zoom-8 tiles, {:.1} MB",
+            r.nodes, r.top_nodes, r.arcs, r.tiles, r.bytes as f64 / 1e6
+        );
+        for (what, secs) in &r.times {
+            println!("  {what}: {secs:.2} s");
+        }
+        println!("peak memory of this process: {:.0} MB", disk::peak_rss() as f64 / 1e6);
+        return Ok(());
+    }
     let t = Instant::now();
     let net = load::read(db.as_ref(), mode, finest)?;
     println!("read: {} nodes, {} arcs, {:.2} s", net.graph.n_nodes(), net.turns.len(), t.elapsed().as_secs_f64());
