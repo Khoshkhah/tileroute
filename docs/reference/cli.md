@@ -55,6 +55,15 @@ tileroute build kentucky.duckdb -o kentucky.tiles
 It prints the number of files, the size of the top file, of the zoom-8 tile files and of the edge index. With
 `--by-tile` it prints the time of each phase and the peak memory of the process.
 
+## tileroute slim
+
+Copy only the tables that tileroute reads (the arcs of the mode, the road edges, the points of their ends) into a new,
+small database. France: 28.5 GB → 2.0 GB.
+
+```bash
+tileroute slim france.duckdb france-slim.duckdb --mode driving
+```
+
 ## tileroute route
 
 Answer pairs from the tile files only. The process does not open the duckOSM database and does not make shortcuts, so

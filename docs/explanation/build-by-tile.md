@@ -87,6 +87,42 @@ with duckOSM's router.
 The files are 5% larger: a tile cannot see the witnesses of other tiles, and the arc reduction of a tile uses the top
 before the top's own reduction, so a few more shortcuts and arcs stay.
 
+## Results: France (Mac mini, 16 GB)
+
+France driving, from `france-latest.osm.pbf` (2026-11-19). duckOSM's database is 28.5 GB, so `tileroute slim` first copies
+only the three tables that tileroute reads (2.0 GB, 5 s).
+
+| | Value |
+|---|---|
+| Road edges (nodes) | 25,919,934 (28,192 in the top) |
+| Arcs | 62,517,049 |
+| Zoom-8 tiles | 72 |
+| `tileroute build --by-tile` | **547 s, peak memory 9.7 GB** (all in memory: about 50 GB, so not possible on this Mac) |
+| Tile files | 8.7 GB; the top file 794 MB, the largest tile 340 MB |
+
+| Phase | Time |
+|---|---|
+| 1. Nodes | 7 s |
+| 2. Arcs into buckets | 32 s |
+| 3. Fine steps, 72 tiles one at a time | 129 s |
+| 4. Top steps (28,192 nodes) | 256 s |
+| 5. Files | 121 s |
+
+**Queries from the France files** (one thread, 2,000 random pairs, `tileroute route --random 2000`):
+
+| | Value |
+|---|---|
+| One query | **5.3 ms** (the files in the cache of the system); 9.5 ms on the first pass |
+| Read for each query | 7.2 tiles, 31 MB |
+| Peak memory of the process | 4.3 GB, almost all pages of the mapped files |
+| duckOSM's router today (same Mac) | load 11 to 16 s, one route Paris to Marseille 3.7 s, peak 6.4 GB |
+
+Not checked yet for France: the routes against duckOSM's router (the check needs all of France in memory). The method
+is the same as on Kentucky and Monaco, where all checked routes are equal.
+
+**What to improve next:** the top. Its 28,192 nodes take 256 s to prepare, and its file (794 MB) is most of the 31 MB
+that a query reads.
+
 **What decides the peak memory now:** the largest zoom-8 tile (Kentucky: Louisville, 668,580 nodes) and the node tables
 (about 25 bytes for each road edge). For France, the largest tile (Paris) has more nodes than Louisville; the peak is
 expected to fit in the 16 GB of the Mac mini, but it is not measured yet. Europe (about 250 million road edges) needs
