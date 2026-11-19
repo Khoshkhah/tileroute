@@ -55,6 +55,8 @@ nav:
       - Tiles and levels: explanation/levels.md
       - Shortcuts: explanation/shortcuts.md
       - The shortest path: explanation/query.md
+      - The top-down phase: explanation/top-down.md
+      - Updates (new costs): explanation/updates.md
       - Comparison with h3-routing-platform: explanation/comparison.md
   - Reference:
       - The command line: reference/cli.md

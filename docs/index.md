@@ -17,6 +17,8 @@ only the tiles that it needs, so that a country does not need all of its graph i
 | How a road edge gets a tile and a level | [Tiles and levels](explanation/levels.md) |
 | What a shortcut is, and how tileroute makes it | [Shortcuts](explanation/shortcuts.md) |
 | How a query uses the shortcuts | [The shortest path](explanation/query.md) |
+| What the top-down phase gives | [The top-down phase](explanation/top-down.md) |
+| How to update the shortcuts after new costs | [Updates](explanation/updates.md) |
 | How tileroute is different from h3-routing-platform | [Comparison with h3-routing-platform](explanation/comparison.md) |
 | How to run it | [The command line](reference/cli.md) |
 | Time, memory and checks | [Measurements](reference/measurements.md) |

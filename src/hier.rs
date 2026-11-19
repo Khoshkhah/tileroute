@@ -85,6 +85,33 @@ pub struct Hierarchy {
     down: Csr,
     /// the number of shortcuts made at each zoom
     pub shortcuts: Vec<usize>,
+    /// for each zoom: the number of sets, and the sum and the largest of the times of their steps (seconds, one thread)
+    pub steps: Vec<(usize, f64, f64)>,
+    /// the top-down phase: for each tile, the global cost between its exits (None: not made)
+    tables: Option<HashMap<u64, Table>>,
+}
+
+/// The exits of a tile `T` of zoom `z`: the nodes of a level lower than `z` with an arc to or from a node of level `z` or
+/// higher in `T`. `d[i * n + j]`: the global shortest cost from exit `i` to exit `j`.
+struct Table {
+    exits: Vec<u32>,
+    d: Vec<f64>,
+}
+
+impl Table {
+    fn index(&self, v: u32) -> Option<usize> {
+        self.exits.binary_search(&v).ok()
+    }
+}
+
+/// What one search found: the labels (distance, parent) of each direction, the best meeting node, the exits that each
+/// direction reached (pruned search only), and the tiles (cells) of the nodes that it settled.
+struct Search {
+    label: [HashMap<u32, (f64, u32)>; 2],
+    best: f64,
+    meet: u32,
+    exits: [Vec<(u32, f64)>; 2],
+    tiles: std::collections::HashSet<u64>,
 }
 
 /// Make the hierarchy. `turns`: `(from, to, cost)`, each pair once; `level` and `cell` of each node.
@@ -100,6 +127,7 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
     let mut alive = vec![true; n];
     let top = level.iter().copied().max().unwrap_or(0);
     let mut shortcuts = vec![0usize; top as usize + 1];
+    let mut steps = vec![(0usize, 0.0f64, 0.0f64); top as usize + 1];
     for z in (1..=top).rev() {
         let mut sets: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
         for v in 0..n {
@@ -107,11 +135,19 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
                 sets.entry(cell[v]).or_default().push(v as u32);
             }
         }
-        let made: Vec<(u64, Vec<(u32, u32, f64)>)> = sets
+        let made: Vec<(u64, Vec<(u32, u32, f64)>, f64)> = sets
             .par_iter()
-            .map(|(&t, xs)| (t, contract(&arcs, &inn, &alive, &level, &cell, z, t, xs)))
+            .map(|(&t, xs)| {
+                let t0 = std::time::Instant::now();
+                let rows = contract(&arcs, &inn, &alive, &level, &cell, z, t, xs);
+                (t, rows, t0.elapsed().as_secs_f64())
+            })
             .collect();
-        for (t, rows) in made {
+        for (t, rows, secs) in made {
+            let st = &mut steps[z as usize];
+            st.0 += 1;
+            st.1 += secs;
+            st.2 = st.2.max(secs);
             for (u, w, c) in rows {
                 let new = Arc { cost: c, zoom: z, tile: t };
                 match arcs[u as usize].get_mut(&w) {
@@ -146,7 +182,7 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
             }
         }
     }
-    Hierarchy { all: Csr::new(n, all), up: Csr::new(n, up), down: Csr::new(n, down), level, cell, shortcuts }
+    Hierarchy { all: Csr::new(n, all), up: Csr::new(n, up), down: Csr::new(n, down), level, cell, shortcuts, steps, tables: None }
 }
 
 /// The shortcuts over the set `xs` (level `z`, cell `t`): for each node `u` with a turn into the set, a Dijkstra in the
@@ -201,70 +237,231 @@ fn contract(
 }
 
 impl Hierarchy {
-    /// The shortest path from node `s` to node `t`: its cost (the sum of the turn costs) and its nodes. None: no path.
-    pub fn route(&self, s: u32, t: u32) -> Option<(f64, Vec<u32>)> {
-        if s == t {
-            return Some((0.0, vec![s]));
-        }
-        // [forward, backward]: label (distance, parent) of each seen node
-        let mut label: [HashMap<u32, (f64, u32)>; 2] = [HashMap::new(), HashMap::new()];
+    /// The bidirectional search. `prune = Some(L)`: settle only nodes of level `L` or higher; a node of a lower level is an
+    /// exit of the LCA tile: keep its distance, do not go on from it.
+    fn search(&self, s: u32, t: u32, prune: Option<u8>) -> Search {
+        let mut r = Search {
+            label: [HashMap::new(), HashMap::new()],
+            best: f64::INFINITY,
+            meet: u32::MAX,
+            exits: [Vec::new(), Vec::new()],
+            tiles: Default::default(),
+        };
         let mut heap: [BinaryHeap<Key>; 2] = [BinaryHeap::new(), BinaryHeap::new()];
-        label[0].insert(s, (0.0, u32::MAX));
-        label[1].insert(t, (0.0, u32::MAX));
+        r.label[0].insert(s, (0.0, u32::MAX));
+        r.label[1].insert(t, (0.0, u32::MAX));
         heap[0].push(Key(0.0, s));
         heap[1].push(Key(0.0, t));
-        let (mut best, mut meet) = (f64::INFINITY, u32::MAX);
         loop {
             let top = |h: &BinaryHeap<Key>| h.peek().map_or(f64::INFINITY, |k| k.0);
             let (f, b) = (top(&heap[0]), top(&heap[1]));
-            if f.min(b) >= best || (f.is_infinite() && b.is_infinite()) {
+            if f.min(b) >= r.best || (f.is_infinite() && b.is_infinite()) {
                 break;
             }
             let dir = if f <= b { 0 } else { 1 };
             let Key(d, v) = heap[dir].pop().expect("not empty");
-            if d > label[dir][&v].0 {
+            if d > r.label[dir][&v].0 {
                 continue;
             }
-            if let Some(&(e, _)) = label[1 - dir].get(&v) {
-                if d + e < best {
-                    best = d + e;
-                    meet = v;
+            r.tiles.insert(self.cell[v as usize]);
+            if prune.is_some_and(|l| self.level[v as usize] < l) {
+                r.exits[dir].push((v, d));
+                continue;
+            }
+            if let Some(&(e, _)) = r.label[1 - dir].get(&v) {
+                if d + e < r.best {
+                    r.best = d + e;
+                    r.meet = v;
                 }
             }
             let g = if dir == 0 { &self.up } else { &self.down };
             for (w, a) in g.of(v) {
                 let nd = d + a.cost;
-                if label[dir].get(&w).is_none_or(|&(e, _)| nd < e) {
-                    label[dir].insert(w, (nd, v));
+                if r.label[dir].get(&w).is_none_or(|&(e, _)| nd < e) {
+                    r.label[dir].insert(w, (nd, v));
                     heap[dir].push(Key(nd, w));
                 }
             }
         }
-        if meet == u32::MAX {
-            return None;
-        }
-        // the path of arcs: s .. meet (forward parents), meet .. t (backward parents)
-        let mut top_path = vec![meet];
-        while let Some(&(_, p)) = label[0].get(top_path.last().expect("not empty")) {
+        r
+    }
+
+    /// Forward (`dir` 0): the nodes from `s` to `v`, appended to `path`, which ends with `s`. Backward (`dir` 1): the nodes
+    /// from `v` to `t`, appended to `path`, which ends with `v`. Each arc is unpacked.
+    fn chain(&self, r: &Search, dir: usize, v: u32, path: &mut Vec<u32>) {
+        let mut c = vec![v];
+        while let Some(&(_, p)) = r.label[dir].get(c.last().expect("not empty")) {
             if p == u32::MAX {
                 break;
             }
-            top_path.push(p);
+            c.push(p);
         }
-        top_path.reverse();
-        let mut v = meet;
-        while let Some(&(_, p)) = label[1].get(&v) {
-            if p == u32::MAX {
-                break;
-            }
-            top_path.push(p);
-            v = p;
+        if dir == 0 {
+            c.reverse();
+        }
+        for w in c.windows(2) {
+            self.unpack(w[0], w[1], path);
+        }
+    }
+
+    /// The shortest path from node `s` to node `t`: its cost (the sum of the arc costs) and its nodes. None: no path.
+    pub fn route(&self, s: u32, t: u32) -> Option<(f64, Vec<u32>)> {
+        self.route_stats(s, t).0
+    }
+
+    /// [`route`](Self::route), and the number of tiles (cells) of the nodes that the search settled.
+    pub fn route_stats(&self, s: u32, t: u32) -> (Option<(f64, Vec<u32>)>, usize) {
+        if s == t {
+            return (Some((0.0, vec![s])), 1);
+        }
+        let r = self.search(s, t, None);
+        if r.meet == u32::MAX {
+            return (None, r.tiles.len());
         }
         let mut path = vec![s];
-        for w in top_path.windows(2) {
-            self.unpack(w[0], w[1], &mut path);
+        self.chain(&r, 0, r.meet, &mut path);
+        self.chain(&r, 1, r.meet, &mut path);
+        (Some((r.best, path)), r.tiles.len())
+    }
+
+    /// The query with the top-down tables: the search stays in the LCA tile of `s` and `t`, and a path that leaves it goes
+    /// through the table of that tile. Needs [`top_down`](Self::top_down).
+    pub fn route_lca(&self, s: u32, t: u32) -> (Option<(f64, Vec<u32>)>, usize) {
+        if s == t {
+            return (Some((0.0, vec![s])), 1);
         }
-        Some((best, path))
+        let tables = self.tables.as_ref().expect("top_down was run");
+        let (cs, ct) = (self.cell[s as usize], self.cell[t as usize]);
+        let l = crate::tile::lca_zoom(cs, ct);
+        let r = self.search(s, t, Some(l));
+        let mut tiles = r.tiles.len();
+        // the best path through the exits: forward to exit y, the table from y to y', backward from y'
+        let mut via: Option<(f64, u32, u32)> = None;
+        if let Some(tab) = tables.get(&crate::tile::parent(cs, l)) {
+            tiles += 1;
+            let n = tab.exits.len();
+            for &(y, dy) in &r.exits[0] {
+                let Some(i) = tab.index(y) else { continue };
+                for &(z, dz) in &r.exits[1] {
+                    let Some(j) = tab.index(z) else { continue };
+                    let c = dy + tab.d[i * n + j] + dz;
+                    if c < r.best && via.is_none_or(|v| c < v.0) {
+                        via = Some((c, y, z));
+                    }
+                }
+            }
+        }
+        let mut path = vec![s];
+        let cost = match via {
+            None if r.meet == u32::MAX => return (None, tiles),
+            None => {
+                self.chain(&r, 0, r.meet, &mut path);
+                self.chain(&r, 1, r.meet, &mut path);
+                r.best
+            }
+            Some((c, y, z)) => {
+                self.chain(&r, 0, y, &mut path);
+                // the part between the two exits: a shortest path on the whole hierarchy (its cost is the table's)
+                let (mid, _) = self.route_stats(y, z);
+                path.extend(mid.expect("the table has a path").1.into_iter().skip(1));
+                self.chain(&r, 1, z, &mut path);
+                c
+            }
+        };
+        (Some((cost, path)), tiles)
+    }
+
+    /// The top-down phase: for each tile, from zoom 1 to the finest level, the global shortest cost between its exits.
+    ///
+    /// A path between two exits of a tile `T` (parent `P`) needs only nodes of level `zoom(P)` or lower, because the
+    /// shortcuts of the finer levels keep the costs between these nodes. Its nodes in `P` are the nodes of level
+    /// `zoom(P)` with cell `P`, and the exits of `P`; between two exits of `P`, the table of `P` has the global cost. So a
+    /// Dijkstra on that small graph, from each exit of `T`, gives the table of `T`.
+    pub fn top_down(&mut self) {
+        let n = self.level.len();
+        // the exits of each tile: each arc between a finer node f and a coarser node c makes c an exit of the tiles that
+        // hold f, from zoom level(c) + 1 to level(f)
+        let mut pairs: Vec<(u64, u32)> = Vec::new();
+        for a in 0..n as u32 {
+            for (b, _) in self.all.of(a) {
+                let (la, lb) = (self.level[a as usize], self.level[b as usize]);
+                let (f, c, lf, lc) = if la > lb { (a, b, la, lb) } else { (b, a, lb, la) };
+                for z in lc + 1..=lf {
+                    pairs.push((crate::tile::parent(self.cell[f as usize], z), c));
+                }
+            }
+        }
+        pairs.par_sort_unstable();
+        pairs.dedup();
+        let mut exits: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
+        for (t, c) in pairs {
+            exits.entry(t).or_default().push(c);
+        }
+        let mut tables: HashMap<u64, Table> = HashMap::new();
+        let top = self.level.iter().copied().max().unwrap_or(0);
+        for z in 1..=top {
+            let tiles: Vec<(&u64, &Vec<u32>)> = exits.iter().filter(|(t, _)| crate::tile::zoom(**t) == z).collect();
+            let made: Vec<(u64, Table)> = tiles
+                .par_iter()
+                .map(|&(&t, ex)| (t, self.table(t, ex, tables.get(&crate::tile::parent(t, z - 1)))))
+                .collect();
+            tables.extend(made);
+        }
+        self.tables = Some(tables);
+    }
+
+    /// The table of tile `t` (exits `ex`, sorted), from the table of its parent.
+    fn table(&self, t: u64, ex: &[u32], parent: Option<&Table>) -> Table {
+        let z = crate::tile::zoom(t);
+        let p = crate::tile::parent(t, z - 1);
+        let in_p = |v: u32| (self.level[v as usize] == z - 1 && self.cell[v as usize] == p) || parent.is_some_and(|q| q.index(v).is_some());
+        let n = ex.len();
+        let mut d = vec![f64::INFINITY; n * n];
+        for (i, &y) in ex.iter().enumerate() {
+            let mut dist: HashMap<u32, f64> = HashMap::new();
+            let mut heap = BinaryHeap::new();
+            dist.insert(y, 0.0);
+            heap.push(Key(0.0, y));
+            while let Some(Key(dv, v)) = heap.pop() {
+                if dv > dist[&v] {
+                    continue;
+                }
+                let relax = |w: u32, c: f64, dist: &mut HashMap<u32, f64>, heap: &mut BinaryHeap<Key>| {
+                    let nd = dv + c;
+                    if dist.get(&w).is_none_or(|&e| nd < e) {
+                        dist.insert(w, nd);
+                        heap.push(Key(nd, w));
+                    }
+                };
+                for (w, a) in self.all.of(v) {
+                    if in_p(w) {
+                        relax(w, a.cost, &mut dist, &mut heap);
+                    }
+                }
+                if let Some(q) = parent {
+                    if let Some(iv) = q.index(v) {
+                        let m = q.exits.len();
+                        for (jw, &w) in q.exits.iter().enumerate() {
+                            let c = q.d[iv * m + jw];
+                            if c.is_finite() {
+                                relax(w, c, &mut dist, &mut heap);
+                            }
+                        }
+                    }
+                }
+            }
+            for (j, &w) in ex.iter().enumerate() {
+                if let Some(&c) = dist.get(&w) {
+                    d[i * n + j] = c;
+                }
+            }
+        }
+        Table { exits: ex.to_vec(), d }
+    }
+
+    /// The number of exits and table cells of the top-down phase.
+    pub fn table_size(&self) -> (usize, usize, usize) {
+        self.tables.as_ref().map_or((0, 0, 0), |t| (t.len(), t.values().map(|x| x.exits.len()).sum(), t.values().map(|x| x.d.len()).sum()))
     }
 
     /// Add the nodes of the arc `a -> b` after `a` (which is already in `path`).
