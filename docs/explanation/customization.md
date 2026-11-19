@@ -97,6 +97,46 @@ WSL PC, the same 2,000 pairs, one thread, in memory, `check --partition 16 --cch
   search and the query reads the shared structure with a mask. A separate copy of the needed arcs for each cost
   gave 0.26 ms, but it costs 268 MB for each cost on Kentucky; the mask costs 4.6 MB.
 
+## Weights for each query: the best of a few routes
+
+A query can give its own weights: cost = w₁ · time + w₂ · length + … A customization for each query takes seconds,
+so it is too slow. The cheap estimate: customize one metric for each cost type (and some fixed mixes) on the shared
+structure; for a query, find the best route of each metric (the searches run in parallel), and keep the route with
+the smallest cost for the weights of the query.
+
+**The measurement** (`tileroute check --partition 16 --weights`): two cost types, time and length (the length of an
+arc is the length of its first road edge, as duckOSM's cost is the time of its first road edge). A mix l gives
+cost = l · time / (mean time) + (1 − l) · length / (mean length). The exact route of each mix comes from a
+customization of that mix. The error is (cost of the estimate − cost of the exact route) / cost of the exact route.
+
+**Kentucky, 2,000 random pairs:**
+
+| l | Time and length routes: exact | mean error | largest error | Time, length and 50/50 routes: exact | mean error | largest error |
+|---|---|---|---|---|---|---|
+| 0.1 | 13.9% | 0.15% | 2.1% | 16.9% | 0.12% | 1.8% |
+| 0.2 | 8.8% | 0.53% | 5.6% | 16.6% | 0.30% | 2.8% |
+| 0.3 | 7.4% | 0.98% | 7.3% | 27.0% | 0.28% | 3.8% |
+| 0.4 | 8.7% | 1.29% | 13.1% | 48.4% | 0.10% | 2.1% |
+| 0.5 | 11.2% | 1.39% | 14.5% | 100% | 0% | 0% |
+| 0.6 | 16.3% | 1.29% | 19.3% | 56.5% | 0.05% | 1.5% |
+| 0.7 | 24.5% | 0.98% | 15.0% | 44.8% | 0.14% | 3.5% |
+| 0.8 | 34.4% | 0.57% | 9.5% | 46.3% | 0.18% | 8.4% |
+| 0.9 | 62.6% | 0.18% | 4.2% | 66.6% | 0.10% | 3.9% |
+
+Monaco (5,000 pairs, short routes): with time and length, 96 to 98% exact, mean error below 0.08%; with the 50/50
+route too, 98 to 100% exact.
+
+**What this shows:**
+
+- On long routes the estimate is seldom the exact route, but it is near: with time and length only, the mean error is
+  at most 1.4%; one more candidate (the 50/50 mix) brings the mean error to 0.3% or less.
+- The largest error of one pair can be large: up to 19% with two candidates, up to 8.4% with three.
+- Each candidate costs one customization (2.3 s on Kentucky) and one metric in memory. The searches run in parallel,
+  so the wait of one query is about one search; but each query uses one core for each candidate, so a busy server
+  answers fewer queries per second.
+- The exact method for any weights is [option B](weights.md) (the hull corners of each edge): no error, but more
+  numbers for each edge. Not measured yet.
+
 ## Earlier: the triangle version with XYZ-tile cells
 
 [Updates](updates.md) measured a triangle version before: with the XYZ-tile cells it had 4 times the edges, and 100

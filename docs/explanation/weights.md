@@ -1,5 +1,9 @@
 # Weights: a cost made of many items
 
+!!! note "Measured: a cheap estimate"
+    The best of a few routes (one metric for each cost type and a mix) is a cheap estimate: on Kentucky its mean
+    error is 0.3% or less with three candidates, the largest 8.4% ([Weights for each query](customization.md#weights-for-each-query-the-best-of-a-few-routes)).
+
 !!! note "Status: plan, not built"
     This page is the design. The code today has one cost for each arc (the travel time).
 

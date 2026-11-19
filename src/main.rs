@@ -169,6 +169,9 @@ fn run() -> Result<(), String> {
     if args.iter().any(|a| a == "--cch") {
         cch_check(&net, &pairs, &ours);
     }
+    if args.iter().any(|a| a == "--weights") {
+        weights_check(&net, db.as_ref(), &mode, &pairs)?;
+    }
     let ids = &net.graph.ids;
     if let Some(dir) = args.iter().position(|a| a == "--files").and_then(|i| args.get(i + 1)) {
         // the routes from the tile files must equal the routes in memory: the same cost, and a path of that cost
@@ -498,4 +501,60 @@ fn cch_check(net: &load::Network, pairs: &[(u32, u32)], ours: &[Option<(f64, Vec
         settled / k,
         relaxed / k
     );
+}
+
+/// `check --weights`: is the best of the routes of single costs (time, length) a good estimate of the best route for a
+/// mix of them? For each mix: cost = l * time / mean time + (1 - l) * length / mean length, with the exact route from
+/// a customization of that mix.
+fn weights_check(net: &load::Network, db: &std::path::Path, mode: &str, pairs: &[(u32, u32)]) -> Result<(), String> {
+    use tileroute::cch::Cch;
+    // the length of an arc: the length of its first road edge (duckOSM's cost is the time of the first road edge)
+    let con = load::open(db)?;
+    let mut st = con.prepare(&format!("SELECT edge_id, length_m::DOUBLE FROM {mode}.edges")).map_err(|e| e.to_string())?;
+    let mut rows = st.query([]).map_err(|e| e.to_string())?;
+    let mut len_of = vec![0.0f64; net.graph.n_nodes()];
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let id: i64 = r.get(0).map_err(|e| e.to_string())?;
+        if let Some(i) = net.graph.index_of(id) {
+            len_of[i] = r.get::<_, Option<f64>>(1).map_err(|e| e.to_string())?.unwrap_or(0.0);
+        }
+    }
+    let time = net.turns.clone();
+    let length: Vec<(u32, u32, f64)> = time.iter().map(|&(u, w, _)| (u, w, len_of[u as usize])).collect();
+    let k = time.len() as f64;
+    let (mt, ml) = (time.iter().map(|a| a.2).sum::<f64>() / k, length.iter().map(|a| a.2).sum::<f64>() / k);
+    let mix = |l: f64| -> Vec<(u32, u32, f64)> { time.iter().zip(&length).map(|(a, b)| (a.0, a.1, l * a.2 / mt + (1.0 - l) * b.2 / ml)).collect() };
+    let weight: std::collections::HashMap<(u32, u32), (f64, f64)> = time.iter().zip(&length).map(|(a, b)| ((a.0, a.1), (a.2, b.2))).collect();
+    let c = Cch::new(net.graph.n_nodes(), time.iter().map(|a| (a.0, a.1)), &net.level, &net.cell);
+    let t = Instant::now();
+    let candidates = [c.customize(&time, true), c.customize(&length, true), c.customize(&mix(0.5), true)];
+    println!("weights: 3 candidate metrics (time, length, 50/50 mix) customized in {:.1} s", t.elapsed().as_secs_f64());
+    let routes: Vec<Vec<Option<Vec<u32>>>> = candidates.iter().map(|m| pairs.par_iter().map(|&(s, t)| m.route(s, t).0.map(|r| r.1)).collect()).collect();
+    println!("{:>5} | {:>28} | {:>28}", "l", "best of time, length", "best of time, length, 50/50");
+    println!("{:>5} | {:>8} {:>9} {:>9} | {:>8} {:>9} {:>9}", "", "exact", "mean err", "max err", "exact", "mean err", "max err");
+    for l in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] {
+        let m = c.customize(&mix(l), true);
+        let cost_of = |p: &Vec<u32>| p.windows(2).map(|w| { let (a, b) = weight[&(w[0], w[1])]; l * a / mt + (1.0 - l) * b / ml }).sum::<f64>();
+        let mut out = String::new();
+        for kk in [2usize, 3] {
+            let (mut n, mut exact, mut sum, mut max) = (0usize, 0usize, 0.0f64, 0.0f64);
+            for (i, &(s, t)) in pairs.iter().enumerate() {
+                let Some((best, _)) = m.route(s, t).0 else { continue };
+                let est = routes[..kk].iter().filter_map(|r| r[i].as_ref()).map(cost_of).fold(f64::INFINITY, f64::min);
+                if best <= 0.0 {
+                    continue;
+                }
+                let err = (est - best) / best;
+                n += 1;
+                if err <= 1e-9 {
+                    exact += 1;
+                }
+                sum += err.max(0.0);
+                max = max.max(err);
+            }
+            out += &format!(" | {:>7.1}% {:>8.3}% {:>8.2}%", exact as f64 * 100.0 / n.max(1) as f64, sum * 100.0 / n.max(1) as f64, max * 100.0);
+        }
+        println!("{l:>5.1}{out}");
+    }
+    Ok(())
 }
