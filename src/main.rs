@@ -167,7 +167,8 @@ fn run() -> Result<(), String> {
         );
     }
     if args.iter().any(|a| a == "--cch") {
-        cch_check(&net, &pairs, &ours);
+        let files = args.iter().position(|a| a == "--cch-files").and_then(|i| args.get(i + 1));
+        cch_check(&net, &pairs, &ours, files.map(|s| s.as_ref()))?;
     }
     if args.iter().any(|a| a == "--weights") {
         weights_check(&net, db.as_ref(), &mode, &pairs)?;
@@ -301,6 +302,9 @@ fn build(args: &[String]) -> Result<(), String> {
     let xyz = args.iter().any(|a| a == "--xyz-files");
     let net = load::read_with(db.as_ref(), mode, finest, leaf)?;
     println!("read: {} nodes, {} arcs, {:.2} s", net.graph.n_nodes(), net.turns.len(), t.elapsed().as_secs_f64());
+    if args.iter().any(|a| a == "--cch") {
+        return build_cch(args, &net, db.as_ref(), mode, top, xyz, dir.as_ref());
+    }
     let t = Instant::now();
     let h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone(), 0, true, false);
     println!("shortcuts: {} arcs in all, {:.2} s", h.n_arcs(), t.elapsed().as_secs_f64());
@@ -376,7 +380,12 @@ fn route_files(args: &[String]) -> Result<(), String> {
     let usage = "usage: tileroute route <folder> (--pairs-file CSV | --random N) [--cache 64]";
     let Some(dir) = args.get(1) else { return Err(usage.into()) };
     let cache: usize = arg(args, "--cache").map_or(Ok(64), |s| s.parse()).map_err(|e| format!("--cache: {e}"))?;
-    let store = disk::Store::open(dir.as_ref(), cache).map_err(|e| e.to_string())?;
+    // --metric NAME: a folder of `build --cch` (the shared structure and the costs of this metric)
+    let cch = match arg(args, "--metric") {
+        Some(m) => Some(tileroute::cchdisk::Store::open(dir.as_ref(), m).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let store = if cch.is_some() { None } else { Some(disk::Store::open(dir.as_ref(), cache).map_err(|e| e.to_string())?) };
     let pairs: Vec<(i64, i64)> = if let Some(k) = arg(args, "--random") {
         // N random pairs of edge ids from edges.idx (a fixed sequence), for an area with no pairs file
         let k: usize = k.parse().map_err(|e| format!("--random: {e}"))?;
@@ -408,7 +417,15 @@ fn route_files(args: &[String]) -> Result<(), String> {
         })
         .collect::<Result<_, _>>()?
     };
-    println!("opened {dir}: {} tile files; process {:.1} MB peak", store.n_files(), disk::peak_rss() as f64 / 1e6);
+    let n_files = cch.as_ref().map_or_else(|| store.as_ref().map_or(0, |s| s.n_files()), |c| c.n_files());
+    println!("opened {dir}: {n_files} tile files; process {:.1} MB peak", disk::peak_rss() as f64 / 1e6);
+    let route = |a: i64, b: i64| -> Result<(Option<(f64, Vec<i64>)>, disk::Stats), String> {
+        match (&cch, &store) {
+            (Some(c), _) => c.route(a, b).map(|(r, tiles)| (r, disk::Stats { tiles, bytes: 0 })).map_err(|e| e.to_string()),
+            (None, Some(s)) => s.route(a, b).map_err(|e| e.to_string()),
+            _ => unreachable!("one store"),
+        }
+    };
     // --write CSV: the cost of each pair (the sum of the arc costs; -1: no path), from the first pass
     let mut write: Option<String> = arg(args, "--write").map(|_| String::from("source,target,cost\n"));
     // two passes on one thread: the first maps the files, the second finds them in the cache of the operating system
@@ -416,7 +433,7 @@ fn route_files(args: &[String]) -> Result<(), String> {
         let (mut ms, mut tiles, mut bytes, mut max_t, mut max_b, mut found) = (0.0, 0usize, 0usize, 0usize, 0usize, 0usize);
         for &(a, b) in &pairs {
             let t = Instant::now();
-            let (r, st) = store.route(a, b).map_err(|e| e.to_string())?;
+            let (r, st) = route(a, b)?;
             ms += t.elapsed().as_secs_f64() * 1e3;
             if pass == "first" {
                 if let Some(w) = write.as_mut() {
@@ -442,13 +459,14 @@ fn route_files(args: &[String]) -> Result<(), String> {
     if let (Some(path), Some(w)) = (arg(args, "--write"), write) {
         std::fs::write(path, w).map_err(|e| format!("{path}: {e}"))?;
     }
-    println!("files mapped: {}; peak memory of this process: {:.1} MB ({})", store.mapped.load(std::sync::atomic::Ordering::Relaxed), disk::peak_rss() as f64 / 1e6, proc_memory());
+    let mapped = store.as_ref().map_or(n_files as u64, |s| s.mapped.load(std::sync::atomic::Ordering::Relaxed));
+    println!("files mapped: {mapped}; peak memory of this process: {:.1} MB ({})", disk::peak_rss() as f64 / 1e6, proc_memory());
     Ok(())
 }
 
 /// `check --cch`: the structure with no costs and its customization (`tileroute::cch`), against the routes of the
 /// hierarchy: the same cost for each pair, and a path of that cost.
-fn cch_check(net: &load::Network, pairs: &[(u32, u32)], ours: &[Option<(f64, Vec<u32>)>]) {
+fn cch_check(net: &load::Network, pairs: &[(u32, u32)], ours: &[Option<(f64, Vec<u32>)>], files: Option<&std::path::Path>) -> Result<(), String> {
     use tileroute::cch::Cch;
     let n = net.graph.n_nodes();
     let t = Instant::now();
@@ -501,6 +519,22 @@ fn cch_check(net: &load::Network, pairs: &[(u32, u32)], ours: &[Option<(f64, Vec
         settled / k,
         relaxed / k
     );
+    if let Some(dir) = files {
+        // the routes from the files (metric "time") must equal the routes of the metric in memory
+        let store = tileroute::cchdisk::Store::open(dir, "time").map_err(|e| e.to_string())?;
+        let ids = &net.graph.ids;
+        let (mut same, mut wrong) = (0usize, 0usize);
+        for &(s, t) in pairs {
+            let mem = m.route(s, t).0.map(|(c, p)| (c, p.iter().map(|&v| ids[v as usize]).collect::<Vec<i64>>()));
+            let (disk, _) = store.route(ids[s as usize], ids[t as usize]).map_err(|e| e.to_string())?;
+            if disk == mem { same += 1 } else { wrong += 1 }
+        }
+        println!("cch files against memory: {} pairs | same {same} | different {wrong}", pairs.len());
+        if wrong > 0 {
+            return Err(format!("{wrong} routes from the cch files differ from memory"));
+        }
+    }
+    Ok(())
 }
 
 /// `check --weights`: is the best of the routes of single costs (time, length) a good estimate of the best route for a
@@ -508,19 +542,8 @@ fn cch_check(net: &load::Network, pairs: &[(u32, u32)], ours: &[Option<(f64, Vec
 /// a customization of that mix.
 fn weights_check(net: &load::Network, db: &std::path::Path, mode: &str, pairs: &[(u32, u32)]) -> Result<(), String> {
     use tileroute::cch::Cch;
-    // the length of an arc: the length of its first road edge (duckOSM's cost is the time of the first road edge)
-    let con = load::open(db)?;
-    let mut st = con.prepare(&format!("SELECT edge_id, length_m::DOUBLE FROM {mode}.edges")).map_err(|e| e.to_string())?;
-    let mut rows = st.query([]).map_err(|e| e.to_string())?;
-    let mut len_of = vec![0.0f64; net.graph.n_nodes()];
-    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-        let id: i64 = r.get(0).map_err(|e| e.to_string())?;
-        if let Some(i) = net.graph.index_of(id) {
-            len_of[i] = r.get::<_, Option<f64>>(1).map_err(|e| e.to_string())?.unwrap_or(0.0);
-        }
-    }
     let time = net.turns.clone();
-    let length: Vec<(u32, u32, f64)> = time.iter().map(|&(u, w, _)| (u, w, len_of[u as usize])).collect();
+    let length = arc_lengths(net, db, mode)?;
     let k = time.len() as f64;
     let (mt, ml) = (time.iter().map(|a| a.2).sum::<f64>() / k, length.iter().map(|a| a.2).sum::<f64>() / k);
     let mix = |l: f64| -> Vec<(u32, u32, f64)> { time.iter().zip(&length).map(|(a, b)| (a.0, a.1, l * a.2 / mt + (1.0 - l) * b.2 / ml)).collect() };
@@ -555,6 +578,58 @@ fn weights_check(net: &load::Network, db: &std::path::Path, mode: &str, pairs: &
             out += &format!(" | {:>7.1}% {:>8.3}% {:>8.2}%", exact as f64 * 100.0 / n.max(1) as f64, sum * 100.0 / n.max(1) as f64, max * 100.0);
         }
         println!("{l:>5.1}{out}");
+    }
+    Ok(())
+}
+
+/// The length of each arc of `net.turns`: the length of its first road edge (duckOSM's cost is the time of the first
+/// road edge).
+fn arc_lengths(net: &load::Network, db: &std::path::Path, mode: &str) -> Result<Vec<(u32, u32, f64)>, String> {
+    let con = load::open(db)?;
+    let mut st = con.prepare(&format!("SELECT edge_id, length_m::DOUBLE FROM {mode}.edges")).map_err(|e| e.to_string())?;
+    let mut rows = st.query([]).map_err(|e| e.to_string())?;
+    let mut len_of = vec![0.0f64; net.graph.n_nodes()];
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let id: i64 = r.get(0).map_err(|e| e.to_string())?;
+        if let Some(i) = net.graph.index_of(id) {
+            len_of[i] = r.get::<_, Option<f64>>(1).map_err(|e| e.to_string())?.unwrap_or(0.0);
+        }
+    }
+    Ok(net.turns.iter().map(|&(u, w, _)| (u, w, len_of[u as usize])).collect())
+}
+
+/// `build --cch [--metrics time,length]`: the structure with no costs and one folder of costs for each metric.
+fn build_cch(args: &[String], net: &load::Network, db: &std::path::Path, mode: &str, top: u8, xyz: bool, dir: &std::path::Path) -> Result<(), String> {
+    use tileroute::cch::Cch;
+    let names: Vec<String> = arg(args, "--metrics").map_or("time", |s| s.as_str()).split(',').map(String::from).collect();
+    let t = Instant::now();
+    let c = Cch::new(net.graph.n_nodes(), net.turns.iter().map(|a| (a.0, a.1)), &net.level, &net.cell);
+    println!("structure: {} edges, {:.2} s", c.n_edges(), t.elapsed().as_secs_f64());
+    let mut costs = Vec::new();
+    for name in &names {
+        costs.push(match name.as_str() {
+            "time" => net.turns.clone(),
+            "length" => arc_lengths(net, db, mode)?,
+            m => return Err(format!("unknown metric {m} (time, length)")),
+        });
+    }
+    let metrics: Vec<_> = costs
+        .iter()
+        .zip(&names)
+        .map(|(a, name)| {
+            let t = Instant::now();
+            let m = c.customize(a, true);
+            println!("metric {name}: customization {:.2} s", t.elapsed().as_secs_f64());
+            m
+        })
+        .collect();
+    let t = Instant::now();
+    let named: Vec<(&str, &tileroute::cch::Metric)> = names.iter().map(String::as_str).zip(metrics.iter()).collect();
+    let bytes = tileroute::cchdisk::write(&c, &named, &net.graph.ids, &net.level, &net.cell, xyz.then_some(&net.home[..]), top, dir).map_err(|e| e.to_string())?;
+    let size = |sub: &str| -> u64 { std::fs::read_dir(dir.join(sub)).map(|d| d.filter_map(|e| e.ok()?.metadata().ok()).map(|m| m.len()).sum()).unwrap_or(0) };
+    println!("wrote {}: {:.1} MB in all, {:.2} s; structure {:.1} MB", dir.display(), bytes as f64 / 1e6, t.elapsed().as_secs_f64(), size("structure") as f64 / 1e6);
+    for name in &names {
+        println!("  metric {name}: {:.1} MB", size(name) as f64 / 1e6);
     }
     Ok(())
 }

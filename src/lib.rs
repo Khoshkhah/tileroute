@@ -3,6 +3,7 @@
 pub mod disk;
 pub mod bytile;
 pub mod cch;
+pub mod cchdisk;
 pub mod hier;
 pub mod load;
 pub mod part;
