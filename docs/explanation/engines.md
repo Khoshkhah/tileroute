@@ -18,15 +18,17 @@ all routers: the start point of a road edge and the end point of another road ed
 | GraphHopper CH | 11.1 | import 20.8 s (CH and Landmarks together) | 3.8 GB | 200 MB | **0.38 ms** | 807 MB (Java) |
 | GraphHopper Landmarks | 11.1 | the same import | | | 3.7 ms | 807 MB (Java) |
 | Valhalla | 3.9.3 | tiles 9.2 s | 2.8 GB | 258 MB | 5.2 ms | 614 MB |
-| **tileroute**, first version | 0.1 | read 1.5 s + shortcuts 6.1 s | 5.2 GB ¹ | (no files yet) | 5.3 ms | 1,168 MB ² |
-| **tileroute**, 2026-11-19 (saved paths, witness search, memory layout) | 0.1 | read 1.6 s + shortcuts 8.9 s | 4.3 GB ¹ | (no files yet) | **1.38 ms** | 802 MB ² |
+| **tileroute**, first version | 0.1 | read 1.5 s + shortcuts 6.1 s | 5.2 GB ¹ | (no files yet) | 5.3 ms | not measured ² |
+| **tileroute**, 2026-11-19 (saved paths, witness search, memory layout) | 0.1 | read 1.6 s + shortcuts 8.9 s (slower: the witness search) | 4.3 GB ¹ | (no files yet) | **1.38 ms** | not measured ² |
 
 - The router queries go over HTTP on the same computer, one at a time with one kept connection: their time includes a
   small HTTP cost (about 0.1 ms). tileroute is called directly. Memory at query time: the server process after the
   10,000 queries.
 - ¹ The peak of the whole run (read, shortcuts, queries).
-- ² The data that a query needs: the hierarchy (first version 1,117 MB, now 750 MB) and the edge ids (52 MB). The process holds more, because the
-  check also keeps duckOSM's reference graph.
+- ² Not comparable yet: tileroute has no query-only process. Its query data (computed size) is 1,169 MB in the first
+  version and 802 MB now (hierarchy 750 MB + edge ids 52 MB), but the measured process holds 3.2 GB after the
+  preparation, with the leftovers of the preparation and duckOSM's reference graph. A fair measurement needs a process
+  that only loads a finished hierarchy (milestone M3).
 - The preparation of tileroute starts from the duckOSM database, so the work of reading the `.osm.pbf` (OSRM's extract,
   GraphHopper's import) is not in its number; duckOSM's build of Kentucky took 29 s for that work.
 
