@@ -25,6 +25,7 @@ tileroute check kentucky.duckdb --mode driving --pairs 10000
 | `--pairs N` | all pairs | Compare N random pairs (a fixed sequence). `0`: make the shortcuts only. |
 | `--pairs-file CSV` | none | Use these pairs: a CSV with the duckOSM edge ids of the start and the target in its first two columns, and a header line |
 | `--profile` | off | Print where the time of a query goes: nodes settled, search time, unpack time |
+| `--limit K` | none | An experiment, not exact: the search may not go above the ancestor K zooms coarser than the common tile of the start and the target; prints how many routes become longer |
 | `--no-reference` | off | Do not compare with duckOSM's router; print only tileroute's time per query |
 | `--write-pairs FILE` | none | Write the pairs and tileroute's costs as CSV (`source,target,cost`), for other routers |
 

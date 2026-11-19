@@ -47,16 +47,23 @@ Where the time of one tileroute query goes (Kentucky, the same pairs, one thread
 
 | Part | Value |
 |---|---|
-| Nodes that the search settles | 4,226 (a good contraction hierarchy: some hundreds) |
-| Search | 7.4 ms (WSL PC) |
-| Unpack (shortcuts back to road edges) | 3.1 ms |
-| Nodes on the path | 433 |
+| Measure | First version | With saved paths, flat arrays, stall-on-demand |
+|---|---|---|
+| Nodes that the search settles | 4,226 | 4,181 (a good contraction hierarchy: some hundreds) |
+| Arcs that the search opens | — | **581,951: 139 for each settled node** |
+| Search | 7.4 ms | 6.9 ms (WSL PC) |
+| Unpack (shortcuts back to road edges) | 3.1 ms | 0.16 ms |
+| One query | about 10.5 ms | 7.3 ms (WSL PC) |
+| Query data in memory | 1,168 MB | 925 MB |
+
+The saved paths remove the unpack cost. The search stays slow because each settled node has many arcs: the top of the
+hierarchy is dense.
 
 | Cause | Effect | Fix |
 |---|---|---|
 | The order comes from the tiles only, and there is no witness search | the top of the hierarchy is dense (zoom 6: 137,928 shortcuts for 360 nodes), so the search opens many arcs | a witness search (skip a shortcut when a path of the same cost exists without it); important roads higher inside each set |
-| Each shortcut is unpacked with a Dijkstra in its tile | 3.1 ms for each query | store the middle node of each shortcut |
-| Labels in hash maps; no stall-on-demand | slower steps | flat arrays; stall-on-demand |
+| Each shortcut was unpacked with a Dijkstra in its tile | 3.1 ms for each query | **done**: each shortcut saves its inner nodes (on average 1.7); unpack 0.16 ms |
+| Labels in hash maps; no stall-on-demand | slower steps | **done**: flat arrays and stall-on-demand (small effect, because of the dense top) |
 | Each arc is stored three times, 24 bytes each (all, up, down) | 1.1 GB for Kentucky | one arc list with indices; a small tile number in place of the 64-bit key |
 
 These fixes are milestone M2c of the [Plan](../plan.md).

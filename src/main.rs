@@ -71,7 +71,11 @@ fn run() -> Result<(), String> {
         (h.query_bytes() + ids_bytes) as f64 / 1e6,
         rss()
     );
-    let route = |s: u32, t: u32| h.route(s, t);
+    let limit: Option<u8> = args.iter().position(|a| a == "--limit").and_then(|i| args.get(i + 1)).and_then(|x| x.parse().ok());
+    let route = |s: u32, t: u32| match limit {
+        Some(k) => h.route_limited(s, t, k),
+        None => h.route(s, t),
+    };
 
     // the pairs: all, or N random ones (a fixed sequence)
     let from_file = args.iter().position(|a| a == "--pairs-file").and_then(|i| args.get(i + 1));
@@ -115,12 +119,13 @@ fn run() -> Result<(), String> {
     let mean = |f: &(dyn Fn(u32, u32) -> usize + Sync)| pairs.par_iter().map(|&(s, t)| f(s, t)).sum::<usize>() as f64 / pairs.len().max(1) as f64;
     println!("tiles per query: {:.1}", mean(&|s, t| h.route_stats(s, t).1));
     if args.iter().any(|a| a == "--profile") {
-        let rows: Vec<(usize, f64, f64, usize)> = pairs.iter().map(|&(s, t)| h.profile(s, t)).collect();
+        let rows: Vec<(usize, f64, f64, usize, usize)> = pairs.iter().map(|&(s, t)| h.profile(s, t)).collect();
         let k = rows.len().max(1) as f64;
-        let sum = |f: &dyn Fn(&(usize, f64, f64, usize)) -> f64| rows.iter().map(f).sum::<f64>() / k;
+        let sum = |f: &dyn Fn(&(usize, f64, f64, usize, usize)) -> f64| rows.iter().map(f).sum::<f64>() / k;
         println!(
-            "profile (one thread): {:.0} nodes settled, search {:.3} ms, unpack {:.3} ms, {:.0} nodes on the path",
+            "profile (one thread): {:.0} nodes settled, {:.0} arcs opened, search {:.3} ms, unpack {:.3} ms, {:.0} nodes on the path",
             sum(&|r| r.0 as f64),
+            sum(&|r| r.4 as f64),
             sum(&|r| r.1) * 1e3,
             sum(&|r| r.2) * 1e3,
             sum(&|r| r.3 as f64)
@@ -165,6 +170,19 @@ fn run() -> Result<(), String> {
             }
             _ => bad.push(i),
         }
+    }
+    if limit.is_some() {
+        // how much longer the wrong routes are
+        let extra: Vec<f64> = bad.iter().filter_map(|&i| match (&ours[i], &refs[i]) {
+            (Some((d, _)), Some((rd, _))) if *rd > 0.0 => Some(d / rd - 1.0),
+            _ => None,
+        }).collect();
+        let lost = bad.iter().filter(|&&i| ours[i].is_none() && refs[i].is_some()).count();
+        let mean = extra.iter().sum::<f64>() / extra.len().max(1) as f64;
+        let max = extra.iter().cloned().fold(0.0, f64::max);
+        println!("limit: {} routes longer (mean +{:.2}%, largest +{:.1}%), {lost} routes not found", extra.len(), mean * 100.0, max * 100.0);
+        println!("time per query (one thread): tileroute {ms_ours:.3} ms");
+        return Ok(());
     }
     println!(
         "pairs: {} | same path {same} | tie (other path, equal cost) {tie} | no path {none} | wrong {}",

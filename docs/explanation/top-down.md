@@ -38,6 +38,23 @@ has the global cost between them. The checks show 0 wrong routes (Monaco: all 7.
 - A change of one arc cost can change the tables of many tiles everywhere, so the tables do not support fast updates
   ([Updates](updates.md)).
 
+## A limit with no tables (`tileroute check --limit k`)
+
+A simpler idea: the search may not go above the ancestor k zooms coarser than the common tile of s and t, and there are
+no tables. This is **not exact**: a best route that leaves that tile is missed. Kentucky, 2,000 pairs, one thread:
+
+| Limit | Longer routes | How much longer | Not found | One query |
+|---|---|---|---|---|
+| none (exact) | 0 | — | 0 | 7.31 ms |
+| k = 0 (the common tile) | 47 (2.4%) | mean +7.4%, largest +41% | 3 | 6.08 ms |
+| k = 1 (its parent) | 20 (1.0%) | mean +5.1%, largest +17% | 2 | 6.87 ms |
+| k = 2 | 2 (0.1%) | mean +7.3% | 2 | 7.38 ms |
+| k = 3 | 1 (0.05%) | +135% | 1 | — |
+
+The limit makes the query at most 17% faster, and some routes become wrong (one by +135% even at k = 3). The search
+time comes from the dense top of the hierarchy (see [Comparison with other routers](engines.md)), not from the climb
+above the common tile. So the limit is not kept as a method.
+
 ## Where it can still help
 
 With the tiles in files, the pruned query knows **before the search** which tiles it needs: the tiles in the LCA tile

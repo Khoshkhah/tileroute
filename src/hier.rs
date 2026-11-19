@@ -96,14 +96,58 @@ pub struct Hierarchy {
     paths: Vec<u32>,
 }
 
-/// What one search found: the labels (distance, parent) of each direction, the best meeting node, and the tiles (cells)
-/// of the nodes that it settled.
+/// The labels of one search direction in flat arrays, used again by the next query of the same thread: a node has a
+/// label only if its stamp is the stamp of this query.
+struct Labels {
+    dist: Vec<f64>,
+    parent: Vec<u32>,
+    stamp: Vec<u32>,
+    now: u32,
+}
+
+impl Labels {
+    fn new() -> Labels {
+        Labels { dist: Vec::new(), parent: Vec::new(), stamp: Vec::new(), now: 0 }
+    }
+
+    fn start(&mut self, n: usize) {
+        if self.stamp.len() != n {
+            self.dist = vec![0.0; n];
+            self.parent = vec![0; n];
+            self.stamp = vec![0; n];
+            self.now = 0;
+        }
+        self.now = self.now.wrapping_add(1);
+        if self.now == 0 {
+            self.stamp.iter_mut().for_each(|x| *x = 0);
+            self.now = 1;
+        }
+    }
+
+    fn get(&self, v: u32) -> Option<(f64, u32)> {
+        (self.stamp[v as usize] == self.now).then(|| (self.dist[v as usize], self.parent[v as usize]))
+    }
+
+    fn set(&mut self, v: u32, d: f64, p: u32) {
+        self.stamp[v as usize] = self.now;
+        self.dist[v as usize] = d;
+        self.parent[v as usize] = p;
+    }
+}
+
+thread_local! {
+    static LABELS: std::cell::RefCell<Option<[Labels; 2]>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What one search found: the labels of each direction, the best meeting node, the nodes that it settled and (if asked)
+/// their tiles (cells).
 struct Search {
-    label: [HashMap<u32, (f64, u32)>; 2],
+    label: [Labels; 2],
     best: f64,
     meet: u32,
     tiles: std::collections::HashSet<u64>,
     settled: usize,
+    relaxed: usize,
 }
 
 /// Make the hierarchy. `turns`: `(from, to, cost)`, each pair once; `level` and `cell` of each node.
@@ -246,18 +290,17 @@ fn contract(
 }
 
 impl Hierarchy {
-    /// The bidirectional search of a contraction hierarchy.
-    fn search(&self, s: u32, t: u32) -> Search {
-        let mut r = Search {
-            label: [HashMap::new(), HashMap::new()],
-            best: f64::INFINITY,
-            meet: u32::MAX,
-            tiles: Default::default(),
-            settled: 0,
-        };
+    /// The bidirectional search of a contraction hierarchy, with stall-on-demand: a node is not expanded when a node
+    /// higher in the hierarchy already gives it a shorter distance. `tiles`: also collect the tiles of the settled nodes.
+    fn search(&self, s: u32, t: u32, tiles: bool, lowest: u8) -> Search {
+        let n = self.level.len();
+        let mut label = LABELS.with(|l| l.borrow_mut().take()).unwrap_or_else(|| [Labels::new(), Labels::new()]);
+        label[0].start(n);
+        label[1].start(n);
+        let mut r = Search { label, best: f64::INFINITY, meet: u32::MAX, tiles: Default::default(), settled: 0, relaxed: 0 };
         let mut heap: [BinaryHeap<Key>; 2] = [BinaryHeap::new(), BinaryHeap::new()];
-        r.label[0].insert(s, (0.0, u32::MAX));
-        r.label[1].insert(t, (0.0, u32::MAX));
+        r.label[0].set(s, 0.0, u32::MAX);
+        r.label[1].set(t, 0.0, u32::MAX);
         heap[0].push(Key(0.0, s));
         heap[1].push(Key(0.0, t));
         loop {
@@ -268,22 +311,33 @@ impl Hierarchy {
             }
             let dir = if f <= b { 0 } else { 1 };
             let Key(d, v) = heap[dir].pop().expect("not empty");
-            if d > r.label[dir][&v].0 {
+            if d > r.label[dir].get(v).expect("a node in the heap has a label").0 {
                 continue;
             }
-            r.tiles.insert(self.cell[v as usize]);
+            // the limit (an experiment, not exact): no node of a level below `lowest`
+            if self.level[v as usize] < lowest {
+                continue;
+            }
             r.settled += 1;
-            if let Some(&(e, _)) = r.label[1 - dir].get(&v) {
+            if tiles {
+                r.tiles.insert(self.cell[v as usize]);
+            }
+            if let Some((e, _)) = r.label[1 - dir].get(v) {
                 if d + e < r.best {
                     r.best = d + e;
                     r.meet = v;
                 }
             }
-            let g = if dir == 0 { &self.up } else { &self.down };
-            for (w, a) in g.of(v) {
+            // stall: the arcs from higher nodes into v (forward), or from v to higher nodes (backward)
+            let (go, back) = if dir == 0 { (&self.up, &self.down) } else { (&self.down, &self.up) };
+            if back.of(v).any(|(w, a)| r.label[dir].get(w).is_some_and(|(dw, _)| dw + a.cost < d)) {
+                continue;
+            }
+            for (w, a) in go.of(v) {
+                r.relaxed += 1;
                 let nd = d + a.cost;
-                if r.label[dir].get(&w).is_none_or(|&(e, _)| nd < e) {
-                    r.label[dir].insert(w, (nd, v));
+                if r.label[dir].get(w).is_none_or(|(e, _)| nd < e) {
+                    r.label[dir].set(w, nd, v);
                     heap[dir].push(Key(nd, w));
                 }
             }
@@ -291,11 +345,16 @@ impl Hierarchy {
         r
     }
 
+    /// Give the label arrays back to this thread, for its next query.
+    fn done(r: Search) {
+        LABELS.with(|l| *l.borrow_mut() = Some(r.label));
+    }
+
     /// Forward (`dir` 0): the nodes from `s` to `v`, appended to `path`, which ends with `s`. Backward (`dir` 1): the nodes
     /// from `v` to `t`, appended to `path`, which ends with `v`. Each arc is unpacked.
     fn chain(&self, r: &Search, dir: usize, v: u32, path: &mut Vec<u32>) {
         let mut c = vec![v];
-        while let Some(&(_, p)) = r.label[dir].get(c.last().expect("not empty")) {
+        while let Some((_, p)) = r.label[dir].get(*c.last().expect("not empty")) {
             if p == u32::MAX {
                 break;
             }
@@ -311,37 +370,59 @@ impl Hierarchy {
 
     /// The shortest path from node `s` to node `t`: its cost (the sum of the arc costs) and its nodes. None: no path.
     pub fn route(&self, s: u32, t: u32) -> Option<(f64, Vec<u32>)> {
-        self.route_stats(s, t).0
+        self.route_with(s, t, false).0
     }
 
-    /// Where the time of one query goes: (nodes settled by the search, search seconds, unpack seconds, path nodes).
-    pub fn profile(&self, s: u32, t: u32) -> (usize, f64, f64, usize) {
+    /// Where the time of one query goes: (nodes settled, search seconds, unpack seconds, path nodes, arcs opened).
+    pub fn profile(&self, s: u32, t: u32) -> (usize, f64, f64, usize, usize) {
         let t0 = std::time::Instant::now();
-        let r = self.search(s, t);
+        let r = self.search(s, t, false, 0);
         let ts = t0.elapsed().as_secs_f64();
+        let (settled, relaxed) = (r.settled, r.relaxed);
         if r.meet == u32::MAX {
-            return (r.settled, ts, 0.0, 0);
+            Self::done(r);
+            return (settled, ts, 0.0, 0, relaxed);
         }
         let t1 = std::time::Instant::now();
         let mut path = vec![s];
         self.chain(&r, 0, r.meet, &mut path);
         self.chain(&r, 1, r.meet, &mut path);
-        (r.settled, ts, t1.elapsed().as_secs_f64(), path.len())
+        Self::done(r);
+        (settled, ts, t1.elapsed().as_secs_f64(), path.len(), relaxed)
     }
 
     /// [`route`](Self::route), and the number of tiles (cells) of the nodes that the search settled.
     pub fn route_stats(&self, s: u32, t: u32) -> (Option<(f64, Vec<u32>)>, usize) {
+        self.route_with(s, t, true)
+    }
+
+    /// An experiment, **not exact**: the search may not go above the ancestor `k` zooms coarser than the common tile
+    /// of `s` and `t` (k = 0: the common tile itself). A best route that leaves that tile is missed.
+    pub fn route_limited(&self, s: u32, t: u32, k: u8) -> Option<(f64, Vec<u32>)> {
+        let l = crate::tile::lca_zoom(self.cell[s as usize], self.cell[t as usize]).saturating_sub(k);
+        self.route_full(s, t, false, l).0
+    }
+
+    fn route_with(&self, s: u32, t: u32, stats: bool) -> (Option<(f64, Vec<u32>)>, usize) {
+        self.route_full(s, t, stats, 0)
+    }
+
+    fn route_full(&self, s: u32, t: u32, stats: bool, lowest: u8) -> (Option<(f64, Vec<u32>)>, usize) {
         if s == t {
             return (Some((0.0, vec![s])), 1);
         }
-        let r = self.search(s, t);
+        let r = self.search(s, t, stats, lowest);
+        let tiles = r.tiles.len();
         if r.meet == u32::MAX {
-            return (None, r.tiles.len());
+            Self::done(r);
+            return (None, tiles);
         }
         let mut path = vec![s];
         self.chain(&r, 0, r.meet, &mut path);
         self.chain(&r, 1, r.meet, &mut path);
-        (Some((r.best, path)), r.tiles.len())
+        let best = r.best;
+        Self::done(r);
+        (Some((best, path)), tiles)
     }
 
     /// Add the nodes of the arc `a -> b` after `a` (which is already in `path`).
