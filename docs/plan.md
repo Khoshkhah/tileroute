@@ -23,6 +23,7 @@ tile, natively and in the browser.
 | Per-query weights | Option B: each shortcut keeps the corners of the hull of its vectors | exact for any weights ≥ 0; no preparation for each query |
 | Combined modes | One graph with change arcs; a rule becomes a copy of the graph for each state | the hierarchy works unchanged |
 | Timetable | RAPTOR (McRAPTOR for weights), joined to the walking hierarchy at the stops | a timetable does not fit fixed-cost shortcuts |
+| The whole world, many queries | Cells from a graph partition (small cuts), regions on servers with a copy of the overlay ([page](explanation/distributed.md)) | straight tile borders make the top too large (world: more than 50 GB) |
 | Predicted traffic for driving | Time slices (one cost rebuild for each slice), then slices along the route for long trips | uses the structure and the rebuild that tileroute has |
 
 ## One model for all modes
@@ -65,6 +66,7 @@ So the shortcuts do not hold time functions; they only make the exact time-depen
 | **M6 Many modes** | Walking and cycling checks; one-to-many and many-to-many queries; combined graphs (free change, then rules), with the same model as duckOSM's `route_multimodal` | each mode and each combined graph: 0 wrong routes against duckOSM |
 | **M7 Timetable** | GTFS input, stops with tile keys, walking transfers from the hierarchy, RAPTOR, then McRAPTOR with weights; door-to-door join | equal to a plain time-dependent search for random stops and times |
 | **M7b Predicted traffic** | Slices from SonoFlow's prediction (flow to time, FIFO), one rebuild for each slice, the query by departure time; then the search that changes slices along the route | for each slice, 0 wrong routes against duckOSM's router with that slice; along the route, equal to a plain time-dependent Dijkstra |
+| **D1 to D5 The whole world** | Cells from an inertial flow partition, then regions and the overlay, servers, Europe, a load test ([page](explanation/distributed.md)) | France below 2 ms for each query with small sets; then the steps on that page |
 | **M8 Browser** | WebAssembly package, archive read with HTTP range reads or from browser storage, a demo page | the browser gives the same routes as native, for driving, walking and a timetable trip |
 
 M5, M6, M7 and M7b need M3 and M4 (the tile files), because their data is also stored by tile. M5 and M6 can run in parallel.
