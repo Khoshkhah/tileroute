@@ -271,7 +271,7 @@ fn build(args: &[String]) -> Result<(), String> {
     let net = load::read(db.as_ref(), mode, finest)?;
     println!("read: {} nodes, {} arcs, {:.2} s", net.graph.n_nodes(), net.turns.len(), t.elapsed().as_secs_f64());
     let t = Instant::now();
-    let h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone(), 0, true);
+    let h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone(), 0, true, false);
     println!("shortcuts: {} arcs in all, {:.2} s", h.n_arcs(), t.elapsed().as_secs_f64());
     let t = Instant::now();
     let w = h.write_files(&net.graph.ids, dir.as_ref()).map_err(|e| e.to_string())?;

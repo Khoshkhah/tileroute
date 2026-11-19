@@ -497,7 +497,7 @@ mod tests {
         let level: Vec<u8> = (0..n).map(|v| [12, 14, 9, 5][v as usize % 4]).collect();
         let cell: Vec<u64> = (0..n).map(|v| { let (la, lo) = points[v as usize / 6]; tile::key(la, lo, level[v as usize]) }).collect();
         let ids: Vec<i64> = (0..n as i64).map(|v| 1000 + v * 7).collect();
-        let h = hier::prepare(&turns, level, cell, 0, true);
+        let h = hier::prepare(&turns, level, cell, 0, true, false);
         let dir = std::env::temp_dir().join(format!("tileroute-test-{}", std::process::id()));
         h.write_files(&ids, &dir).expect("write");
         let store = super::Store::open(&dir, 2).expect("open");
