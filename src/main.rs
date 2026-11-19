@@ -1,9 +1,20 @@
-//! `tileroute check <db.duckdb> [--mode driving] [--finest 20] [--pairs N] [--no-reference] [--write-pairs FILE]`:
+//! `tileroute check <db.duckdb> [--mode driving] [--finest 20] [--pairs N] [--pairs-file CSV] [--no-reference] [--write-pairs FILE]`:
 //! make the shortcuts, then compare routes with duckOSM's router (all pairs, or N random pairs).
 
 use rayon::prelude::*;
 use std::time::Instant;
 use tileroute::{hier, load};
+
+/// The memory of this process now (resident set), from `ps`.
+fn rss() -> String {
+    std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .map_or("unknown".into(), |kb| format!("{:.0} MB", kb / 1024.0))
+}
 
 fn main() {
     if let Err(e) = run() {
@@ -44,10 +55,31 @@ fn run() -> Result<(), String> {
         }
     }
 
+    // what a query server keeps: the hierarchy and the edge ids (8 bytes and about 16 bytes of index for each node)
+    let ids_bytes = n * 8 + n * 16;
+    println!(
+        "query data: hierarchy {:.0} MB + edge ids {:.0} MB = {:.0} MB; process now {} (after the preparation)",
+        h.query_bytes() as f64 / 1e6,
+        ids_bytes as f64 / 1e6,
+        (h.query_bytes() + ids_bytes) as f64 / 1e6,
+        rss()
+    );
     let route = |s: u32, t: u32| h.route(s, t);
 
     // the pairs: all, or N random ones (a fixed sequence)
-    let pairs: Vec<(u32, u32)> = match opt("--pairs", "").parse::<usize>() {
+    let from_file = args.iter().position(|a| a == "--pairs-file").and_then(|i| args.get(i + 1));
+    let pairs: Vec<(u32, u32)> = if let Some(path) = from_file {
+        // a CSV with the duckOSM edge ids of the start and the target in its first two columns, and a header line
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let node = |id: &str| -> Result<u32, String> {
+            let id: i64 = id.trim().parse().map_err(|e| format!("{path}: {e}"))?;
+            net.graph.index_of(id).map(|i| i as u32).ok_or(format!("{path}: edge {id} is not in the graph"))
+        };
+        text.lines().skip(1).filter(|l| !l.is_empty()).map(|l| {
+            let mut f = l.split(',');
+            Ok((node(f.next().unwrap_or(""))?, node(f.next().unwrap_or(""))?))
+        }).collect::<Result<_, String>>()?
+    } else { match opt("--pairs", "").parse::<usize>() {
         Ok(k) => {
             let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
             let mut next = || {
@@ -59,7 +91,7 @@ fn run() -> Result<(), String> {
             (0..k).map(|_| (next(), next())).collect()
         }
         Err(_) => (0..n as u32).flat_map(|s| (0..n as u32).map(move |t| (s, t))).collect(),
-    };
+    } };
     let weight: std::collections::HashMap<(u32, u32), f64> = net.turns.iter().map(|&(u, w, c)| ((u, w), c)).collect();
 
     // each query is timed alone; the mean is the time of one query on one thread
@@ -75,6 +107,18 @@ fn run() -> Result<(), String> {
     // the tiles (cells) that one query settles, on average
     let mean = |f: &(dyn Fn(u32, u32) -> usize + Sync)| pairs.par_iter().map(|&(s, t)| f(s, t)).sum::<usize>() as f64 / pairs.len().max(1) as f64;
     println!("tiles per query: {:.1}", mean(&|s, t| h.route_stats(s, t).1));
+    if args.iter().any(|a| a == "--profile") {
+        let rows: Vec<(usize, f64, f64, usize)> = pairs.iter().map(|&(s, t)| h.profile(s, t)).collect();
+        let k = rows.len().max(1) as f64;
+        let sum = |f: &dyn Fn(&(usize, f64, f64, usize)) -> f64| rows.iter().map(f).sum::<f64>() / k;
+        println!(
+            "profile (one thread): {:.0} nodes settled, search {:.3} ms, unpack {:.3} ms, {:.0} nodes on the path",
+            sum(&|r| r.0 as f64),
+            sum(&|r| r.1) * 1e3,
+            sum(&|r| r.2) * 1e3,
+            sum(&|r| r.3 as f64)
+        );
+    }
     let ids = &net.graph.ids;
     if let Some(path) = args.iter().position(|a| a == "--write-pairs").and_then(|i| args.get(i + 1)) {
         // source,target,cost (the sum of the arc costs; -1: no path), for other routers

@@ -23,6 +23,8 @@ tileroute check kentucky.duckdb --mode driving --pairs 10000
 | `--mode` | `driving` | The duckOSM mode: `driving`, `walking` or `cycling` |
 | `--finest` | `20` | The finest level. A road edge with a higher `lca_zoom` gets this level. |
 | `--pairs N` | all pairs | Compare N random pairs (a fixed sequence). `0`: make the shortcuts only. |
+| `--pairs-file CSV` | none | Use these pairs: a CSV with the duckOSM edge ids of the start and the target in its first two columns, and a header line |
+| `--profile` | off | Print where the time of a query goes: nodes settled, search time, unpack time |
 | `--no-reference` | off | Do not compare with duckOSM's router; print only tileroute's time per query |
 | `--write-pairs FILE` | none | Write the pairs and tileroute's costs as CSV (`source,target,cost`), for other routers |
 

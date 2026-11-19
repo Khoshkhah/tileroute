@@ -99,6 +99,7 @@ struct Search {
     best: f64,
     meet: u32,
     tiles: std::collections::HashSet<u64>,
+    settled: usize,
 }
 
 /// Make the hierarchy. `turns`: `(from, to, cost)`, each pair once; `level` and `cell` of each node.
@@ -233,6 +234,7 @@ impl Hierarchy {
             best: f64::INFINITY,
             meet: u32::MAX,
             tiles: Default::default(),
+            settled: 0,
         };
         let mut heap: [BinaryHeap<Key>; 2] = [BinaryHeap::new(), BinaryHeap::new()];
         r.label[0].insert(s, (0.0, u32::MAX));
@@ -251,6 +253,7 @@ impl Hierarchy {
                 continue;
             }
             r.tiles.insert(self.cell[v as usize]);
+            r.settled += 1;
             if let Some(&(e, _)) = r.label[1 - dir].get(&v) {
                 if d + e < r.best {
                     r.best = d + e;
@@ -290,6 +293,21 @@ impl Hierarchy {
     /// The shortest path from node `s` to node `t`: its cost (the sum of the arc costs) and its nodes. None: no path.
     pub fn route(&self, s: u32, t: u32) -> Option<(f64, Vec<u32>)> {
         self.route_stats(s, t).0
+    }
+
+    /// Where the time of one query goes: (nodes settled by the search, search seconds, unpack seconds, path nodes).
+    pub fn profile(&self, s: u32, t: u32) -> (usize, f64, f64, usize) {
+        let t0 = std::time::Instant::now();
+        let r = self.search(s, t);
+        let ts = t0.elapsed().as_secs_f64();
+        if r.meet == u32::MAX {
+            return (r.settled, ts, 0.0, 0);
+        }
+        let t1 = std::time::Instant::now();
+        let mut path = vec![s];
+        self.chain(&r, 0, r.meet, &mut path);
+        self.chain(&r, 1, r.meet, &mut path);
+        (r.settled, ts, t1.elapsed().as_secs_f64(), path.len())
     }
 
     /// [`route`](Self::route), and the number of tiles (cells) of the nodes that the search settled.
@@ -358,6 +376,13 @@ impl Hierarchy {
             self.unpack(prev, x, path);
             prev = x;
         }
+    }
+
+    /// The bytes that a query needs: the three arc lists, the level and the cell of each node (not the shortcut pairs,
+    /// which only a rebuild needs).
+    pub fn query_bytes(&self) -> usize {
+        let csr = |c: &Csr| c.off.len() * 4 + c.other.len() * 4 + c.arc.len() * std::mem::size_of::<Arc>();
+        csr(&self.all) + csr(&self.up) + csr(&self.down) + self.level.len() + self.cell.len() * 8
     }
 
     pub fn n_arcs(&self) -> usize {
