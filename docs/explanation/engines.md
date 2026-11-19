@@ -20,12 +20,15 @@ all routers: the start point of a road edge and the end point of another road ed
 | Valhalla | 3.9.3 | tiles 9.2 s | 2.8 GB | 258 MB | 5.2 ms | 614 MB |
 | **tileroute**, first version | 0.1 | read 1.5 s + shortcuts 6.1 s | 5.2 GB ¹ | (no files yet) | 5.3 ms | not measured ² |
 | **tileroute**, 2026-11-19 (saved paths, witness search, memory layout) | 0.1 | read 1.6 s + shortcuts 8.9 s (slower: the witness search) | 4.3 GB ¹ | (no files yet) | **1.38 ms** | not measured ² |
+| **tileroute**, with arc reduction, in memory | 0.1 | read and shortcuts about 26 s | 4.5 GB ¹ | — | **0.66 ms** | not comparable ² |
+| **tileroute**, with arc reduction, from tile files | 0.1 | the same, then write the files 0.3 s | 4.5 GB ¹ | **704 MB** | **0.81 ms** | **702 MB** ³ |
 
 - The router queries go over HTTP on the same computer, one at a time with one kept connection: their time includes a
   small HTTP cost (about 0.1 ms). tileroute is called directly. Memory at query time: the server process after the
   10,000 queries.
 - ¹ The peak of the whole run (read, shortcuts, queries).
-- ² Not comparable yet: tileroute has no query-only process. Its query data (computed size) is 1,169 MB in the first
+- ³ A process that only maps the tile files and answers the 10,000 queries (`tileroute route`): its peak resident memory. Almost all of it is pages of the mapped files (the process has 9.1 MB before it reads them); the system can free these pages again. A query reads 3.7 tiles and 3.0 MB on average.
+- ² Not comparable: this process also made the shortcuts. Its query data (computed size) is 1,169 MB in the first
   version and 802 MB now (hierarchy 750 MB + edge ids 52 MB), but the measured process holds 3.2 GB after the
   preparation, with the leftovers of the preparation and duckOSM's reference graph. A fair measurement needs a process
   that only loads a finished hierarchy (milestone M3). M3 has this process now ([Tile files](../reference/tile-files.md)),
@@ -106,7 +109,7 @@ These fixes are milestone M2c of the [Plan](../plan.md).
 | GraphHopper | Contraction Hierarchies (fixed), or Landmarks (A* with distances to some nodes, made one time) | CH as OSRM; Landmarks faster | CH: ms; Landmarks: tens of ms | Landmarks keep working with new costs | yes ("custom models", with Landmarks) | no |
 | Valhalla | Tiles with three road-class levels, A* | the cut into tiles | tens to hundreds of ms for long routes | yes, traffic for each tile | yes (costing options) | yes, on demand, with a cache |
 | Google Maps | not public | | | live traffic | | |
-| **tileroute** | Shortcuts by XYZ tile (a contraction hierarchy ordered by tiles), exact | Kentucky 10.5 s (Mac mini) | Kentucky 1.38 ms (Mac mini, one thread, in memory) | a rebuild of all costs (seconds) | planned, exact (hull corners, M5) | yes: one file for each zoom-8 tile, memory-mapped on demand (M3) |
+| **tileroute** | Shortcuts by XYZ tile (a contraction hierarchy ordered by tiles), exact | Kentucky about 26 s (Mac mini) | Kentucky 0.66 ms in memory, 0.81 ms from tile files (Mac mini, one thread) | a rebuild of all costs (seconds) | planned, exact (hull corners, M5) | yes: one file for each zoom-8 tile, memory-mapped on demand (M3) |
 
 ## Transit routers
 
@@ -128,7 +131,7 @@ These fixes are milestone M2c of the [Plan](../plan.md).
 
 | Weak point | Reason | Possible fix |
 |---|---|---|
-| Queries slower than OSRM CH (Mac mini: 1.38 ms before the arc reduction, against 0.58 ms) | the dense top of the hierarchy (many arcs for each top node) | done: saved paths, memory layout, witness search, arc reduction (1.09 ms on the WSL PC); the new Mac number is not measured yet |
+| Queries slower than OSRM CH and GraphHopper CH (Mac mini: 0.66 ms in memory, 0.81 ms from the files, against 0.58 and 0.38 ms) | the dense top of the hierarchy (many arcs for each top node) | done: saved paths, memory layout, witness search, arc reduction; tileroute is now near OSRM CH and faster than OSRM MLD |
 | More shortcuts than a graph partitioner would make | tile borders do not follow the roads | accepted for one tiling protocol |
 | A query reads 8.8 MB of tile files (Kentucky) | the arcs of the low levels are large, and each arc is stored three times | a smaller arc, one arc list ([Tile files](../reference/tile-files.md#next-steps)) |
 | Not a full product | no snapping of points to roads, no turn instructions, no server, no browser yet | later milestones |
