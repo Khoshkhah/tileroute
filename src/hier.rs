@@ -18,15 +18,15 @@ use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
-/// The `zoom` of an arc that is a turn of the input graph, not a shortcut.
-const BASE: u8 = u8::MAX;
 
-/// An arc: its cost, and for a shortcut the zoom and the tile of the set that it jumps over.
+
+/// An arc: its cost, and for a shortcut where its inner nodes are in `Hierarchy::paths`.
 #[derive(Clone, Copy, Debug)]
 struct Arc {
     cost: f64,
-    zoom: u8,
-    tile: u64,
+    /// a shortcut: its inner nodes are `inner[start..start + len]`; an arc of the input graph: `len` = 0
+    start: u32,
+    len: u32,
 }
 
 /// The arcs of each node in flat arrays, sorted by the other node.
@@ -49,13 +49,25 @@ impl Csr {
         Csr { off, other: rows.iter().map(|r| r.1).collect(), arc: rows.iter().map(|r| r.2).collect() }
     }
 
-    fn of(&self, v: u32) -> impl Iterator<Item = (u32, Arc)> + '_ {
-        (self.off[v as usize] as usize..self.off[v as usize + 1] as usize).map(move |k| (self.other[k], self.arc[k]))
-    }
-
     fn find(&self, u: u32, w: u32) -> Option<Arc> {
         let r = self.off[u as usize] as usize..self.off[u as usize + 1] as usize;
         self.other[r.clone()].binary_search(&w).ok().map(|k| self.arc[r.start + k])
+    }
+}
+
+/// The arcs of the search, each node's arcs together: (cost, other node) in one array, so a search reads one stream.
+struct Fast {
+    off: Vec<u32>,
+    arc: Vec<(f64, u32)>,
+}
+
+impl Fast {
+    fn new(c: &Csr) -> Fast {
+        Fast { off: c.off.clone(), arc: c.other.iter().zip(&c.arc).map(|(&w, a)| (a.cost, w)).collect() }
+    }
+
+    fn of(&self, v: u32) -> &[(f64, u32)] {
+        &self.arc[self.off[v as usize] as usize..self.off[v as usize + 1] as usize]
     }
 }
 
@@ -80,62 +92,116 @@ pub struct Hierarchy {
     /// all arcs (turns and shortcuts), by the node they leave
     all: Csr,
     /// the forward search: arcs `u -> w` with `level[w] <= level[u]`, by `u`
-    up: Csr,
-    /// the backward search: arcs `u -> w` with `level[u] <= level[w]`, by `w` (`other` is `u`)
-    down: Csr,
-    /// the number of shortcuts made at each zoom
+    up: Fast,
+    /// the backward search: arcs `u -> w` with `level[u] <= level[w]`, by `w` (the other node is `u`)
+    down: Fast,
+    /// the number of shortcut pairs made at each zoom
     pub shortcuts: Vec<usize>,
     /// for each zoom: the number of sets, and the sum and the largest of the times of their steps (seconds, one thread)
     pub steps: Vec<(usize, f64, f64)>,
-    /// the top-down phase: for each tile, the global cost between its exits (None: not made)
-    tables: Option<HashMap<u64, Table>>,
+    /// every shortcut pair `(u, w, zoom, tile)` that a step made, also when an arc `u -> w` was cheaper: the pairs depend
+    /// only on the network, so a rebuild with new costs uses the same list
+    pub pairs: Vec<(u32, u32, u8, u64)>,
+    /// for each zoom: (shortcut pairs, the sum of their inner nodes, the largest number of inner nodes)
+    pub inner: Vec<(u64, u64, u32)>,
+    /// the inner nodes of the shortcuts (see `Arc`)
+    paths: Vec<u32>,
+    /// for each zoom: the shortcut pairs that the witness search skipped
+    pub witnessed: Vec<usize>,
+    /// the node numbers in memory: `to_new[node]`, and back (the hierarchy uses the new numbers inside)
+    to_new: Vec<u32>,
+    to_old: Vec<u32>,
 }
 
-/// The exits of a tile `T` of zoom `z`: the nodes of a level lower than `z` with an arc to or from a node of level `z` or
-/// higher in `T`. `d[i * n + j]`: the global shortest cost from exit `i` to exit `j`.
-struct Table {
-    exits: Vec<u32>,
-    d: Vec<f64>,
+/// The labels of one search direction in flat arrays, used again by the next query of the same thread: a node has a
+/// label only if its stamp is the stamp of this query.
+struct Labels {
+    dist: Vec<f64>,
+    parent: Vec<u32>,
+    stamp: Vec<u32>,
+    now: u32,
 }
 
-impl Table {
-    fn index(&self, v: u32) -> Option<usize> {
-        self.exits.binary_search(&v).ok()
+impl Labels {
+    fn new() -> Labels {
+        Labels { dist: Vec::new(), parent: Vec::new(), stamp: Vec::new(), now: 0 }
+    }
+
+    fn start(&mut self, n: usize) {
+        if self.stamp.len() != n {
+            self.dist = vec![0.0; n];
+            self.parent = vec![0; n];
+            self.stamp = vec![0; n];
+            self.now = 0;
+        }
+        self.now = self.now.wrapping_add(1);
+        if self.now == 0 {
+            self.stamp.iter_mut().for_each(|x| *x = 0);
+            self.now = 1;
+        }
+    }
+
+    fn get(&self, v: u32) -> Option<(f64, u32)> {
+        (self.stamp[v as usize] == self.now).then(|| (self.dist[v as usize], self.parent[v as usize]))
+    }
+
+    fn set(&mut self, v: u32, d: f64, p: u32) {
+        self.stamp[v as usize] = self.now;
+        self.dist[v as usize] = d;
+        self.parent[v as usize] = p;
     }
 }
 
-/// What one search found: the labels (distance, parent) of each direction, the best meeting node, the exits that each
-/// direction reached (pruned search only), and the tiles (cells) of the nodes that it settled.
+/// Stall-on-demand in the search (an experiment switch).
+const STALL: bool = false;
+
+thread_local! {
+    static LABELS: std::cell::RefCell<Option<[Labels; 2]>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What one search found: the labels of each direction, the best meeting node, the nodes that it settled and (if asked)
+/// their tiles (cells).
 struct Search {
-    label: [HashMap<u32, (f64, u32)>; 2],
+    label: [Labels; 2],
     best: f64,
     meet: u32,
-    exits: [Vec<(u32, f64)>; 2],
     tiles: std::collections::HashSet<u64>,
+    settled: usize,
+    relaxed: usize,
+    /// the arcs opened from the settled nodes of each level
+    by_level: [usize; 32],
 }
 
 /// Make the hierarchy. `turns`: `(from, to, cost)`, each pair once; `level` and `cell` of each node.
-pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hierarchy {
+///
+/// `core`: the steps stop at this zoom; the nodes of level `core` and coarser stay as one graph (the core), and the
+/// query searches it in both directions like a plain Dijkstra. 0: the steps go to zoom 1.
+pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: u8, renumber: bool, core_ch: bool) -> Hierarchy {
     let n = level.len();
     // all arcs that ever were (never removed), and the nodes with an arc into each node
     let mut arcs: Vec<HashMap<u32, Arc>> = vec![HashMap::new(); n];
     let mut inn: Vec<Vec<u32>> = vec![Vec::new(); n];
     for &(u, w, c) in turns {
-        arcs[u as usize].insert(w, Arc { cost: c, zoom: BASE, tile: 0 });
+        arcs[u as usize].insert(w, Arc { cost: c, start: 0, len: 0 });
         inn[w as usize].push(u);
     }
     let mut alive = vec![true; n];
     let top = level.iter().copied().max().unwrap_or(0);
     let mut shortcuts = vec![0usize; top as usize + 1];
     let mut steps = vec![(0usize, 0.0f64, 0.0f64); top as usize + 1];
-    for z in (1..=top).rev() {
+    let mut pairs = Vec::new();
+    let mut inner = vec![(0u64, 0u64, 0u32); top as usize + 1];
+    // the inner nodes of all kept shortcuts, one after the other
+    let mut paths: Vec<u32> = Vec::new();
+    let mut witnessed = vec![0usize; top as usize + 1];
+    for z in (core.max(0) + 1..=top).rev() {
         let mut sets: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
         for v in 0..n {
             if level[v] == z {
                 sets.entry(cell[v]).or_default().push(v as u32);
             }
         }
-        let made: Vec<(u64, Vec<(u32, u32, f64)>, f64)> = sets
+        let made: Vec<(u64, Vec<(u32, u32, f64, Vec<u32>, bool)>, f64)> = sets
             .par_iter()
             .map(|(&t, xs)| {
                 let t0 = std::time::Instant::now();
@@ -148,15 +214,22 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
             st.0 += 1;
             st.1 += secs;
             st.2 = st.2.max(secs);
-            for (u, w, c) in rows {
-                let new = Arc { cost: c, zoom: z, tile: t };
-                match arcs[u as usize].get_mut(&w) {
-                    Some(a) if c < a.cost => *a = new,
-                    Some(_) => {}
-                    None => {
-                        arcs[u as usize].insert(w, new);
+            for (u, w, c, p, needed) in rows {
+                let k = p.len() as u32;
+                inner[z as usize].0 += 1;
+                inner[z as usize].1 += k as u64;
+                inner[z as usize].2 = inner[z as usize].2.max(k);
+                pairs.push((u, w, z, t));
+                shortcuts[z as usize] += 1;
+                if !needed {
+                    witnessed[z as usize] += 1;
+                }
+                let keep = needed && arcs[u as usize].get(&w).is_none_or(|a| c < a.cost);
+                if keep {
+                    let new = Arc { cost: c, start: paths.len() as u32, len: k };
+                    paths.extend(p);
+                    if arcs[u as usize].insert(w, new).is_none() {
                         inn[w as usize].push(u);
-                        shortcuts[z as usize] += 1;
                     }
                 }
             }
@@ -167,6 +240,19 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
             }
         }
     }
+    // the core: with `core_ch`, a classic contraction hierarchy (one node at a time, by importance) gives each core node
+    // its own rank; without it, all core nodes count as the same level
+    let rank: HashMap<u32, u32> = if core_ch && core > 0 {
+        let nodes: Vec<u32> = (0..n as u32).filter(|&v| alive[v as usize]).collect();
+        contract_core(&mut arcs, &mut inn, &mut alive, &nodes, &mut paths)
+    } else {
+        HashMap::new()
+    };
+    // the place of a node in the hierarchy: larger is higher; equal only for nodes of one level outside the core
+    let ord = |v: u32| -> u64 {
+        let major = 255 - level[v as usize].max(core) as u64;
+        (major << 32) | rank.get(&v).map_or(0, |&r| r as u64 + 1)
+    };
     let mut all = Vec::new();
     let mut up = Vec::new();
     let mut down = Vec::new();
@@ -174,15 +260,47 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
         for (&w, &a) in m {
             let u = u as u32;
             all.push((u, w, a));
-            if level[w as usize] <= level[u as usize] {
+            let (ou, ow) = (ord(u), ord(w));
+            if ow >= ou {
                 up.push((u, w, a));
             }
-            if level[u as usize] <= level[w as usize] {
+            if ou >= ow {
                 down.push((w, u, a));
             }
         }
     }
-    Hierarchy { all: Csr::new(n, all), up: Csr::new(n, up), down: Csr::new(n, down), level, cell, shortcuts, steps, tables: None }
+    // the memory order: new node numbers by level (the top first), then by cell, so that the nodes that a query reads
+    // most are near each other in memory
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    if renumber {
+        order.sort_unstable_by_key(|&v| (level[v as usize], cell[v as usize], v));
+    }
+    let mut to_new = vec![0u32; n];
+    for (i, &v) in order.iter().enumerate() {
+        to_new[v as usize] = i as u32;
+    }
+    let map = |rows: Vec<(u32, u32, Arc)>| -> Vec<(u32, u32, Arc)> {
+        rows.into_iter().map(|(u, w, a)| (to_new[u as usize], to_new[w as usize], a)).collect()
+    };
+    let (all, up, down) = (map(all), map(up), map(down));
+    let paths: Vec<u32> = paths.into_iter().map(|v| to_new[v as usize]).collect();
+    let level: Vec<u8> = order.iter().map(|&v| level[v as usize]).collect();
+    let cell: Vec<u64> = order.iter().map(|&v| cell[v as usize]).collect();
+    Hierarchy {
+        all: Csr::new(n, all),
+        up: Fast::new(&Csr::new(n, up)),
+        down: Fast::new(&Csr::new(n, down)),
+        level,
+        cell,
+        shortcuts,
+        steps,
+        pairs,
+        inner,
+        paths,
+        witnessed,
+        to_new,
+        to_old: order,
+    }
 }
 
 /// The shortcuts over the set `xs` (level `z`, cell `t`): for each node `u` with a turn into the set, a Dijkstra in the
@@ -197,23 +315,25 @@ fn contract(
     z: u8,
     t: u64,
     xs: &[u32],
-) -> Vec<(u32, u32, f64)> {
+) -> Vec<(u32, u32, f64, Vec<u32>, bool)> {
     let in_set = |v: u32| level[v as usize] == z && cell[v as usize] == t;
     let sources: BTreeSet<u32> =
         xs.iter().flat_map(|&x| inn[x as usize].iter().copied()).filter(|&u| alive[u as usize] && !in_set(u)).collect();
     let mut out = Vec::new();
     for u in sources {
-        let mut dist: HashMap<u32, f64> = HashMap::new();
+        // dist: (cost, the node before on the path; u for the first inner node)
+        let mut dist: HashMap<u32, (f64, u32)> = HashMap::new();
         let mut heap = BinaryHeap::new();
         for (&x, a) in &arcs[u as usize] {
-            if in_set(x) && dist.get(&x).is_none_or(|&d| a.cost < d) {
-                dist.insert(x, a.cost);
+            if in_set(x) && dist.get(&x).is_none_or(|&(d, _)| a.cost < d) {
+                dist.insert(x, (a.cost, u));
                 heap.push(Key(a.cost, x));
             }
         }
-        let mut to: BTreeMap<u32, f64> = BTreeMap::new();
+        // to: (cost, the last inner node)
+        let mut to: BTreeMap<u32, (f64, u32)> = BTreeMap::new();
         while let Some(Key(d, x)) = heap.pop() {
-            if d > dist[&x] {
+            if d > dist[&x].0 {
                 continue;
             }
             for (&y, a) in &arcs[x as usize] {
@@ -222,34 +342,196 @@ fn contract(
                 }
                 let nd = d + a.cost;
                 if in_set(y) {
-                    if dist.get(&y).is_none_or(|&e| nd < e) {
-                        dist.insert(y, nd);
+                    if dist.get(&y).is_none_or(|&(e, _)| nd < e) {
+                        dist.insert(y, (nd, x));
                         heap.push(Key(nd, y));
                     }
-                } else if y != u && to.get(&y).is_none_or(|&e| nd < e) {
-                    to.insert(y, nd);
+                } else if y != u && to.get(&y).is_none_or(|&(e, _)| nd < e) {
+                    to.insert(y, (nd, x));
                 }
             }
         }
-        out.extend(to.into_iter().map(|(w, c)| (u, w, c)));
+        let witness = witness_search(arcs, alive, level, z, u, &to);
+        for (w, (c, last)) in to {
+            let mut p = vec![last];
+            while dist[p.last().expect("not empty")].1 != u {
+                p.push(dist[p.last().expect("not empty")].1);
+            }
+            p.reverse();
+            let needed = witness.get(&w).is_none_or(|&d| d > c);
+            out.push((u, w, c, p, needed));
+        }
     }
     out
 }
 
+/// The classic contraction of the core: one node at a time in the order of importance (the shortcuts that removing it
+/// can need minus the arcs that it removes, plus its removed neighbours). To use all cores, each round removes a set of
+/// nodes that do not touch each other: each node whose importance is smaller than that of all its neighbours. The
+/// witness searches of one round do not use the nodes of that round. Returns the rank of each core node.
+fn contract_core(arcs: &mut [HashMap<u32, Arc>], inn: &mut [Vec<u32>], alive: &mut [bool], nodes: &[u32], paths: &mut Vec<u32>) -> HashMap<u32, u32> {
+    let n = alive.len();
+    let mut removed_nb = vec![0i64; n];
+    let mut rank = HashMap::new();
+    let mut left: Vec<u32> = nodes.to_vec();
+    let neighbours = |arcs: &[HashMap<u32, Arc>], inn: &[Vec<u32>], alive: &[bool], v: u32| -> (Vec<(u32, f64)>, Vec<(u32, f64)>) {
+        let mut ins: Vec<(u32, f64)> = inn[v as usize]
+            .iter()
+            .filter(|&&u| u != v && alive[u as usize])
+            .filter_map(|&u| arcs[u as usize].get(&v).map(|a| (u, a.cost)))
+            .collect();
+        ins.sort_unstable_by_key(|x| x.0);
+        ins.dedup_by_key(|x| x.0);
+        let outs: Vec<(u32, f64)> = arcs[v as usize].iter().filter(|(&w, _)| w != v && alive[w as usize]).map(|(&w, a)| (w, a.cost)).collect();
+        (ins, outs)
+    };
+    while !left.is_empty() {
+        let prio: HashMap<u32, i64> = left
+            .par_iter()
+            .map(|&v| {
+                let (i, o) = neighbours(arcs, inn, alive, v);
+                let (i, o) = (i.len() as i64, o.len() as i64);
+                (v, i * o - i - o + 2 * removed_nb[v as usize])
+            })
+            .collect();
+        let key = |v: u32| (prio[&v], v);
+        // the nodes of this round: smaller than all their neighbours
+        let round: Vec<u32> = left
+            .par_iter()
+            .copied()
+            .filter(|&v| {
+                let (i, o) = neighbours(arcs, inn, alive, v);
+                i.iter().chain(o.iter()).all(|&(x, _)| key(v) < key(x))
+            })
+            .collect();
+        let mut usable = alive.to_vec();
+        for &v in &round {
+            usable[v as usize] = false;
+        }
+        let need: Vec<(u32, Vec<(u32, u32, f64)>)> = round
+            .par_iter()
+            .map(|&v| {
+                let (ins, outs) = neighbours(arcs, inn, alive, v);
+                let mut need = Vec::new();
+                for &(u, cu) in &ins {
+                    let targets: Vec<(u32, f64)> = outs.iter().filter(|&&(w, _)| w != u).map(|&(w, cw)| (w, cu + cw)).collect();
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    // a witness: a path from u to w on the usable nodes (not v, not another node of this round)
+                    let limit = targets.iter().map(|x| x.1).fold(0.0, f64::max);
+                    let mut dist: HashMap<u32, f64> = HashMap::new();
+                    let mut heap = BinaryHeap::new();
+                    dist.insert(u, 0.0);
+                    heap.push(Key(0.0, u));
+                    let mut settled = 0;
+                    while let Some(Key(d, x)) = heap.pop() {
+                        if d > dist[&x] {
+                            continue;
+                        }
+                        settled += 1;
+                        if d > limit || settled > CORE_WITNESS_LIMIT {
+                            break;
+                        }
+                        for (&y, a) in &arcs[x as usize] {
+                            if !usable[y as usize] {
+                                continue;
+                            }
+                            let nd = d + a.cost;
+                            if nd <= limit && dist.get(&y).is_none_or(|&e| nd < e) {
+                                dist.insert(y, nd);
+                                heap.push(Key(nd, y));
+                            }
+                        }
+                    }
+                    for (w, c) in targets {
+                        if dist.get(&w).is_none_or(|&d| d > c) {
+                            need.push((u, w, c));
+                        }
+                    }
+                }
+                (v, need)
+            })
+            .collect();
+        for (v, list) in need {
+            for (u, w, c) in list {
+                if arcs[u as usize].get(&w).is_none_or(|a| c < a.cost) {
+                    let new = Arc { cost: c, start: paths.len() as u32, len: 1 };
+                    paths.push(v);
+                    if arcs[u as usize].insert(w, new).is_none() {
+                        inn[w as usize].push(u);
+                    }
+                }
+            }
+            let (i, o) = neighbours(arcs, inn, alive, v);
+            for (x, _) in i.into_iter().chain(o) {
+                removed_nb[x as usize] += 1;
+            }
+            alive[v as usize] = false;
+            rank.insert(v, rank.len() as u32);
+        }
+        left.retain(|&v| alive[v as usize]);
+    }
+    rank
+}
+
+/// The settled nodes after which a witness search of the core contraction stops.
+const CORE_WITNESS_LIMIT: usize = 100;
+
+/// The settled nodes after which a witness search stops. A limit only keeps some shortcuts that are not needed; it never
+/// skips a needed one.
+// ponytail: a fixed limit; tune it per area if the preparation time or the shortcut count matters more
+const WITNESS_LIMIT: usize = 1000;
+
+/// The witness search from `u`: a Dijkstra on the nodes coarser than `z` (the nodes of all sets of this zoom are left
+/// out, because those sets run at the same time), up to the largest cost of `u`'s shortcuts. Returns the distance to each
+/// target that it reached.
+fn witness_search(arcs: &[HashMap<u32, Arc>], alive: &[bool], level: &[u8], z: u8, u: u32, to: &BTreeMap<u32, (f64, u32)>) -> HashMap<u32, f64> {
+    let limit = to.values().map(|x| x.0).fold(0.0, f64::max);
+    let ok = |v: u32| alive[v as usize] && level[v as usize] < z;
+    let mut dist: HashMap<u32, f64> = HashMap::new();
+    let mut heap = BinaryHeap::new();
+    dist.insert(u, 0.0);
+    heap.push(Key(0.0, u));
+    let mut settled = 0;
+    let mut found = HashMap::new();
+    while let Some(Key(d, v)) = heap.pop() {
+        if d > dist[&v] {
+            continue;
+        }
+        if d > limit || settled >= WITNESS_LIMIT {
+            break;
+        }
+        settled += 1;
+        if v != u && to.contains_key(&v) {
+            found.insert(v, d);
+        }
+        for (&w, a) in &arcs[v as usize] {
+            if !ok(w) {
+                continue;
+            }
+            let nd = d + a.cost;
+            if nd <= limit && dist.get(&w).is_none_or(|&e| nd < e) {
+                dist.insert(w, nd);
+                heap.push(Key(nd, w));
+            }
+        }
+    }
+    found
+}
+
 impl Hierarchy {
-    /// The bidirectional search. `prune = Some(L)`: settle only nodes of level `L` or higher; a node of a lower level is an
-    /// exit of the LCA tile: keep its distance, do not go on from it.
-    fn search(&self, s: u32, t: u32, prune: Option<u8>) -> Search {
-        let mut r = Search {
-            label: [HashMap::new(), HashMap::new()],
-            best: f64::INFINITY,
-            meet: u32::MAX,
-            exits: [Vec::new(), Vec::new()],
-            tiles: Default::default(),
-        };
+    /// The bidirectional search of a contraction hierarchy, with stall-on-demand: a node is not expanded when a node
+    /// higher in the hierarchy already gives it a shorter distance. `tiles`: also collect the tiles of the settled nodes.
+    fn search(&self, s: u32, t: u32, tiles: bool, lowest: u8) -> Search {
+        let n = self.level.len();
+        let mut label = LABELS.with(|l| l.borrow_mut().take()).unwrap_or_else(|| [Labels::new(), Labels::new()]);
+        label[0].start(n);
+        label[1].start(n);
+        let mut r = Search { label, best: f64::INFINITY, meet: u32::MAX, tiles: Default::default(), settled: 0, relaxed: 0, by_level: [0; 32] };
         let mut heap: [BinaryHeap<Key>; 2] = [BinaryHeap::new(), BinaryHeap::new()];
-        r.label[0].insert(s, (0.0, u32::MAX));
-        r.label[1].insert(t, (0.0, u32::MAX));
+        r.label[0].set(s, 0.0, u32::MAX);
+        r.label[1].set(t, 0.0, u32::MAX);
         heap[0].push(Key(0.0, s));
         heap[1].push(Key(0.0, t));
         loop {
@@ -260,25 +542,34 @@ impl Hierarchy {
             }
             let dir = if f <= b { 0 } else { 1 };
             let Key(d, v) = heap[dir].pop().expect("not empty");
-            if d > r.label[dir][&v].0 {
+            if d > r.label[dir].get(v).expect("a node in the heap has a label").0 {
                 continue;
             }
-            r.tiles.insert(self.cell[v as usize]);
-            if prune.is_some_and(|l| self.level[v as usize] < l) {
-                r.exits[dir].push((v, d));
+            // the limit (an experiment, not exact): no node of a level below `lowest`
+            if self.level[v as usize] < lowest {
                 continue;
             }
-            if let Some(&(e, _)) = r.label[1 - dir].get(&v) {
+            r.settled += 1;
+            if tiles {
+                r.tiles.insert(self.cell[v as usize]);
+            }
+            if let Some((e, _)) = r.label[1 - dir].get(v) {
                 if d + e < r.best {
                     r.best = d + e;
                     r.meet = v;
                 }
             }
-            let g = if dir == 0 { &self.up } else { &self.down };
-            for (w, a) in g.of(v) {
-                let nd = d + a.cost;
-                if r.label[dir].get(&w).is_none_or(|&(e, _)| nd < e) {
-                    r.label[dir].insert(w, (nd, v));
+            // stall: the arcs from higher nodes into v (forward), or from v to higher nodes (backward)
+            let (go, back) = if dir == 0 { (&self.up, &self.down) } else { (&self.down, &self.up) };
+            if STALL && back.of(v).iter().any(|&(c, w)| r.label[dir].get(w).is_some_and(|(dw, _)| dw + c < d)) {
+                continue;
+            }
+            for &(c, w) in go.of(v) {
+                r.relaxed += 1;
+                r.by_level[self.level[v as usize] as usize] += 1;
+                let nd = d + c;
+                if r.label[dir].get(w).is_none_or(|(e, _)| nd < e) {
+                    r.label[dir].set(w, nd, v);
                     heap[dir].push(Key(nd, w));
                 }
             }
@@ -286,11 +577,16 @@ impl Hierarchy {
         r
     }
 
+    /// Give the label arrays back to this thread, for its next query.
+    fn done(r: Search) {
+        LABELS.with(|l| *l.borrow_mut() = Some(r.label));
+    }
+
     /// Forward (`dir` 0): the nodes from `s` to `v`, appended to `path`, which ends with `s`. Backward (`dir` 1): the nodes
     /// from `v` to `t`, appended to `path`, which ends with `v`. Each arc is unpacked.
     fn chain(&self, r: &Search, dir: usize, v: u32, path: &mut Vec<u32>) {
         let mut c = vec![v];
-        while let Some(&(_, p)) = r.label[dir].get(c.last().expect("not empty")) {
+        while let Some((_, p)) = r.label[dir].get(*c.last().expect("not empty")) {
             if p == u32::MAX {
                 break;
             }
@@ -306,215 +602,116 @@ impl Hierarchy {
 
     /// The shortest path from node `s` to node `t`: its cost (the sum of the arc costs) and its nodes. None: no path.
     pub fn route(&self, s: u32, t: u32) -> Option<(f64, Vec<u32>)> {
-        self.route_stats(s, t).0
+        self.route_with(s, t, false).0
+    }
+
+    /// Where the time of one query goes: (nodes settled, search seconds, unpack seconds, path nodes, arcs opened).
+    pub fn profile(&self, s: u32, t: u32) -> (usize, f64, f64, usize, usize) {
+        let (s, t) = (self.to_new[s as usize], self.to_new[t as usize]);
+        let t0 = std::time::Instant::now();
+        let r = self.search(s, t, false, 0);
+        let ts = t0.elapsed().as_secs_f64();
+        let (settled, relaxed) = (r.settled, r.relaxed);
+        if r.meet == u32::MAX {
+            Self::done(r);
+            return (settled, ts, 0.0, 0, relaxed);
+        }
+        let t1 = std::time::Instant::now();
+        let mut path = vec![s];
+        self.chain(&r, 0, r.meet, &mut path);
+        self.chain(&r, 1, r.meet, &mut path);
+        Self::done(r);
+        (settled, ts, t1.elapsed().as_secs_f64(), path.len(), relaxed)
     }
 
     /// [`route`](Self::route), and the number of tiles (cells) of the nodes that the search settled.
     pub fn route_stats(&self, s: u32, t: u32) -> (Option<(f64, Vec<u32>)>, usize) {
+        self.route_with(s, t, true)
+    }
+
+    /// An experiment, **not exact**: the search may not go above the ancestor `k` zooms coarser than the common tile
+    /// of `s` and `t` (k = 0: the common tile itself). A best route that leaves that tile is missed.
+    pub fn route_limited(&self, s: u32, t: u32, k: u8) -> Option<(f64, Vec<u32>)> {
+        let (cs, ct) = (self.cell[self.to_new[s as usize] as usize], self.cell[self.to_new[t as usize] as usize]);
+        let l = crate::tile::lca_zoom(cs, ct).saturating_sub(k);
+        self.route_full(s, t, false, l).0
+    }
+
+    fn route_with(&self, s: u32, t: u32, stats: bool) -> (Option<(f64, Vec<u32>)>, usize) {
+        self.route_full(s, t, stats, 0)
+    }
+
+    fn route_full(&self, s: u32, t: u32, stats: bool, lowest: u8) -> (Option<(f64, Vec<u32>)>, usize) {
         if s == t {
             return (Some((0.0, vec![s])), 1);
         }
-        let r = self.search(s, t, None);
+        let (s, t) = (self.to_new[s as usize], self.to_new[t as usize]);
+        let r = self.search(s, t, stats, lowest);
+        let tiles = r.tiles.len();
         if r.meet == u32::MAX {
-            return (None, r.tiles.len());
+            Self::done(r);
+            return (None, tiles);
         }
         let mut path = vec![s];
         self.chain(&r, 0, r.meet, &mut path);
         self.chain(&r, 1, r.meet, &mut path);
-        (Some((r.best, path)), r.tiles.len())
-    }
-
-    /// The query with the top-down tables: the search stays in the LCA tile of `s` and `t`, and a path that leaves it goes
-    /// through the table of that tile. Needs [`top_down`](Self::top_down).
-    pub fn route_lca(&self, s: u32, t: u32) -> (Option<(f64, Vec<u32>)>, usize) {
-        if s == t {
-            return (Some((0.0, vec![s])), 1);
-        }
-        let tables = self.tables.as_ref().expect("top_down was run");
-        let (cs, ct) = (self.cell[s as usize], self.cell[t as usize]);
-        let l = crate::tile::lca_zoom(cs, ct);
-        let r = self.search(s, t, Some(l));
-        let mut tiles = r.tiles.len();
-        // the best path through the exits: forward to exit y, the table from y to y', backward from y'
-        let mut via: Option<(f64, u32, u32)> = None;
-        if let Some(tab) = tables.get(&crate::tile::parent(cs, l)) {
-            tiles += 1;
-            let n = tab.exits.len();
-            for &(y, dy) in &r.exits[0] {
-                let Some(i) = tab.index(y) else { continue };
-                for &(z, dz) in &r.exits[1] {
-                    let Some(j) = tab.index(z) else { continue };
-                    let c = dy + tab.d[i * n + j] + dz;
-                    if c < r.best && via.is_none_or(|v| c < v.0) {
-                        via = Some((c, y, z));
-                    }
-                }
-            }
-        }
-        let mut path = vec![s];
-        let cost = match via {
-            None if r.meet == u32::MAX => return (None, tiles),
-            None => {
-                self.chain(&r, 0, r.meet, &mut path);
-                self.chain(&r, 1, r.meet, &mut path);
-                r.best
-            }
-            Some((c, y, z)) => {
-                self.chain(&r, 0, y, &mut path);
-                // the part between the two exits: a shortest path on the whole hierarchy (its cost is the table's)
-                let (mid, _) = self.route_stats(y, z);
-                path.extend(mid.expect("the table has a path").1.into_iter().skip(1));
-                self.chain(&r, 1, z, &mut path);
-                c
-            }
-        };
-        (Some((cost, path)), tiles)
-    }
-
-    /// The top-down phase: for each tile, from zoom 1 to the finest level, the global shortest cost between its exits.
-    ///
-    /// A path between two exits of a tile `T` (parent `P`) needs only nodes of level `zoom(P)` or lower, because the
-    /// shortcuts of the finer levels keep the costs between these nodes. Its nodes in `P` are the nodes of level
-    /// `zoom(P)` with cell `P`, and the exits of `P`; between two exits of `P`, the table of `P` has the global cost. So a
-    /// Dijkstra on that small graph, from each exit of `T`, gives the table of `T`.
-    pub fn top_down(&mut self) {
-        let n = self.level.len();
-        // the exits of each tile: each arc between a finer node f and a coarser node c makes c an exit of the tiles that
-        // hold f, from zoom level(c) + 1 to level(f)
-        let mut pairs: Vec<(u64, u32)> = Vec::new();
-        for a in 0..n as u32 {
-            for (b, _) in self.all.of(a) {
-                let (la, lb) = (self.level[a as usize], self.level[b as usize]);
-                let (f, c, lf, lc) = if la > lb { (a, b, la, lb) } else { (b, a, lb, la) };
-                for z in lc + 1..=lf {
-                    pairs.push((crate::tile::parent(self.cell[f as usize], z), c));
-                }
-            }
-        }
-        pairs.par_sort_unstable();
-        pairs.dedup();
-        let mut exits: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
-        for (t, c) in pairs {
-            exits.entry(t).or_default().push(c);
-        }
-        let mut tables: HashMap<u64, Table> = HashMap::new();
-        let top = self.level.iter().copied().max().unwrap_or(0);
-        for z in 1..=top {
-            let tiles: Vec<(&u64, &Vec<u32>)> = exits.iter().filter(|(t, _)| crate::tile::zoom(**t) == z).collect();
-            let made: Vec<(u64, Table)> = tiles
-                .par_iter()
-                .map(|&(&t, ex)| (t, self.table(t, ex, tables.get(&crate::tile::parent(t, z - 1)))))
-                .collect();
-            tables.extend(made);
-        }
-        self.tables = Some(tables);
-    }
-
-    /// The table of tile `t` (exits `ex`, sorted), from the table of its parent.
-    fn table(&self, t: u64, ex: &[u32], parent: Option<&Table>) -> Table {
-        let z = crate::tile::zoom(t);
-        let p = crate::tile::parent(t, z - 1);
-        let in_p = |v: u32| (self.level[v as usize] == z - 1 && self.cell[v as usize] == p) || parent.is_some_and(|q| q.index(v).is_some());
-        let n = ex.len();
-        let mut d = vec![f64::INFINITY; n * n];
-        for (i, &y) in ex.iter().enumerate() {
-            let mut dist: HashMap<u32, f64> = HashMap::new();
-            let mut heap = BinaryHeap::new();
-            dist.insert(y, 0.0);
-            heap.push(Key(0.0, y));
-            while let Some(Key(dv, v)) = heap.pop() {
-                if dv > dist[&v] {
-                    continue;
-                }
-                let relax = |w: u32, c: f64, dist: &mut HashMap<u32, f64>, heap: &mut BinaryHeap<Key>| {
-                    let nd = dv + c;
-                    if dist.get(&w).is_none_or(|&e| nd < e) {
-                        dist.insert(w, nd);
-                        heap.push(Key(nd, w));
-                    }
-                };
-                for (w, a) in self.all.of(v) {
-                    if in_p(w) {
-                        relax(w, a.cost, &mut dist, &mut heap);
-                    }
-                }
-                if let Some(q) = parent {
-                    if let Some(iv) = q.index(v) {
-                        let m = q.exits.len();
-                        for (jw, &w) in q.exits.iter().enumerate() {
-                            let c = q.d[iv * m + jw];
-                            if c.is_finite() {
-                                relax(w, c, &mut dist, &mut heap);
-                            }
-                        }
-                    }
-                }
-            }
-            for (j, &w) in ex.iter().enumerate() {
-                if let Some(&c) = dist.get(&w) {
-                    d[i * n + j] = c;
-                }
-            }
-        }
-        Table { exits: ex.to_vec(), d }
-    }
-
-    /// The number of exits and table cells of the top-down phase.
-    pub fn table_size(&self) -> (usize, usize, usize) {
-        self.tables.as_ref().map_or((0, 0, 0), |t| (t.len(), t.values().map(|x| x.exits.len()).sum(), t.values().map(|x| x.d.len()).sum()))
+        let best = r.best;
+        Self::done(r);
+        (Some((best, path.into_iter().map(|v| self.to_old[v as usize]).collect())), tiles)
     }
 
     /// Add the nodes of the arc `a -> b` after `a` (which is already in `path`).
     fn unpack(&self, a: u32, b: u32, path: &mut Vec<u32>) {
         let arc = self.all.find(a, b).expect("an arc of the path is in the graph");
-        if arc.zoom == BASE {
-            path.push(b);
-            return;
-        }
-        // the shortest path a -> b with its inner nodes in the set (zoom, tile): the same Dijkstra as in `contract`
-        let in_set = |v: u32| self.level[v as usize] == arc.zoom && self.cell[v as usize] == arc.tile;
-        let mut label: HashMap<u32, (f64, u32)> = HashMap::new();
-        let mut heap = BinaryHeap::new();
-        for (x, e) in self.all.of(a) {
-            if in_set(x) && label.get(&x).is_none_or(|&(d, _)| e.cost < d) {
-                label.insert(x, (e.cost, a));
-                heap.push(Key(e.cost, x));
-            }
-        }
-        let mut end: Option<(f64, u32)> = None;
-        while let Some(Key(d, x)) = heap.pop() {
-            if x == b {
-                break;
-            }
-            if d > label[&x].0 {
-                continue;
-            }
-            for (y, e) in self.all.of(x) {
-                let nd = d + e.cost;
-                if in_set(y) {
-                    if label.get(&y).is_none_or(|&(f, _)| nd < f) {
-                        label.insert(y, (nd, x));
-                        heap.push(Key(nd, y));
-                    }
-                } else if y == b && end.is_none_or(|(f, _)| nd < f) {
-                    end = Some((nd, x));
-                    heap.push(Key(nd, b));
-                }
-            }
-        }
-        let (cost, mut x) = end.expect("a shortcut has its path in its set");
-        debug_assert_eq!(cost, arc.cost);
-        let mut inner = vec![];
-        while x != a {
-            inner.push(x);
-            x = label[&x].1;
-        }
-        inner.reverse();
+        // each step a -> x1 -> ... -> b is an arc (an arc of the input graph or a finer shortcut); the arcs to the
+        // nodes of a set never change after its step, so the saved path stays valid
         let mut prev = a;
-        for x in inner.into_iter().chain(std::iter::once(b)) {
+        for &x in &self.paths[arc.start as usize..(arc.start + arc.len) as usize] {
             self.unpack(prev, x, path);
             prev = x;
         }
+        if arc.len == 0 {
+            path.push(b);
+        } else {
+            self.unpack(prev, b, path);
+        }
+    }
+
+    /// The bytes that a query needs: the three arc lists, the level and the cell of each node (not the shortcut pairs,
+    /// which only a rebuild needs).
+    pub fn query_bytes(&self) -> usize {
+        let csr = |c: &Csr| c.off.len() * 4 + c.other.len() * 4 + c.arc.len() * std::mem::size_of::<Arc>();
+        let fast = |c: &Fast| c.off.len() * 4 + c.arc.len() * 16;
+        csr(&self.all) + fast(&self.up) + fast(&self.down) + self.level.len() + self.cell.len() * 8 + self.paths.len() * 4
+    }
+
+    /// The arcs opened from the settled nodes of each level, summed over the queries `pairs`.
+    pub fn arcs_by_level(&self, pairs: &[(u32, u32)]) -> [usize; 32] {
+        let mut sum = [0usize; 32];
+        for &(s, t) in pairs {
+            let r = self.search(self.to_new[s as usize], self.to_new[t as usize], false, 0);
+            for (a, b) in sum.iter_mut().zip(r.by_level.iter()) {
+                *a += b;
+            }
+            Self::done(r);
+        }
+        sum
+    }
+
+    /// For each level: (nodes, sum of out-degrees in the shortcut graph, sum of forward-search degrees, largest
+    /// forward-search degree).
+    pub fn degrees(&self) -> Vec<(usize, usize, usize, usize)> {
+        let mut d = vec![(0, 0, 0, 0); 32];
+        for v in 0..self.level.len() {
+            let x = &mut d[self.level[v] as usize];
+            let all = (self.all.off[v + 1] - self.all.off[v]) as usize;
+            let up = (self.up.off[v + 1] - self.up.off[v]) as usize;
+            x.0 += 1;
+            x.1 += all;
+            x.2 += up;
+            x.3 = x.3.max(up);
+        }
+        d
     }
 
     pub fn n_arcs(&self) -> usize {

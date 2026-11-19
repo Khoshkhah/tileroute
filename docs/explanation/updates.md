@@ -34,7 +34,9 @@ The problem: most of the time is in a few large steps at the coarse zooms. Metro
 A change that reaches zoom 9 to 12 runs these large steps again: up to about 2.2 s, against 3.6 s for a full
 preparation. So version 1 is fast only when a change stops at the fine zooms.
 
-## Version 2: triangles (`tileroute check --cch`)
+## Version 2: triangles (not kept)
+
+The code was removed (milestone M2); it is in the git history, at commit `e39a78e` (`tileroute check --cch`).
 
 The nodes are removed **one at a time**, in the same order as the sets (finest level first). This is a customizable
 contraction hierarchy (CCH) whose order comes from the tiles.
@@ -88,5 +90,8 @@ and it needs no extra structure. So **tileroute rebuilds all shortcut costs** wh
 - For a country, the rebuild time must be measured (France). If it is too long, a rebuild by region (one zoom-8 tile
   and its ancestors) is the next step.
 
-Version 2 and the top-down phase stay recorded on these pages, and the code stays in git history; the plan is to remove
-them from the code ([Plan](../plan.md)).
+Version 2 and the top-down phase stay recorded on these pages. Their code was removed (milestone M2) and is in the git
+history, at commit `e39a78e`.
+
+For the rebuild, tileroute keeps **every shortcut pair** that a step makes, also when a direct arc is cheaper today
+(`Hierarchy::pairs`). The pairs depend only on the network, so a rebuild with new costs uses the same list.

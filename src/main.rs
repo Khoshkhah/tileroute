@@ -1,9 +1,20 @@
-//! `tileroute check <db.duckdb> [--mode driving] [--finest 20] [--pairs N] [--no-reference] [--write-pairs FILE]`:
+//! `tileroute check <db.duckdb> [--mode driving] [--finest 20] [--pairs N] [--pairs-file CSV] [--no-reference] [--write-pairs FILE]`:
 //! make the shortcuts, then compare routes with duckOSM's router (all pairs, or N random pairs).
 
 use rayon::prelude::*;
 use std::time::Instant;
-use tileroute::{cch::Cch, hier, load};
+use tileroute::{hier, load};
+
+/// The memory of this process now (resident set), from `ps`.
+fn rss() -> String {
+    std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .map_or("unknown".into(), |kb| format!("{:.0} MB", kb / 1024.0))
+}
 
 fn main() {
     if let Err(e) = run() {
@@ -29,8 +40,17 @@ fn run() -> Result<(), String> {
     println!("read: edge graph with {n} nodes (road edges) and {} arcs (edge_graph rows), {:.2} s", net.turns.len(), t.elapsed().as_secs_f64());
 
     let t = Instant::now();
-    let mut h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone());
-    println!("shortcuts: {} made, {} arcs in all, {:.3} s", h.shortcuts.iter().sum::<usize>(), h.n_arcs(), t.elapsed().as_secs_f64());
+    let core: u8 = opt("--core", "0").parse().map_err(|e| format!("--core: {e}"))?;
+    let renumber = !args.iter().any(|a| a == "--no-renumber");
+    // --top-ch Z: the tile steps down to zoom Z + 1, then a classic contraction hierarchy for the top (zoom Z and coarser)
+    let top_ch: u8 = opt("--top-ch", "0").parse().map_err(|e| format!("--top-ch: {e}"))?;
+    let (core, core_ch) = if top_ch > 0 { (top_ch, true) } else { (core, false) };
+    let t_prep = Instant::now();
+    let h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone(), core, renumber, core_ch);
+    if core_ch {
+        println!("top: classic contraction hierarchy for zoom {top_ch} and coarser; preparation {:.2} s", t_prep.elapsed().as_secs_f64());
+    }
+    println!("shortcuts: {} pairs made, {} arcs in all, {:.3} s", h.shortcuts.iter().sum::<usize>(), h.n_arcs(), t.elapsed().as_secs_f64());
     for (z, c) in h.shortcuts.iter().enumerate() {
         let nodes = net.level.iter().filter(|&&l| l as usize == z).count();
         if *c > 0 || nodes > 0 {
@@ -44,38 +64,53 @@ fn run() -> Result<(), String> {
         }
     }
 
-    let lca = args.iter().any(|a| a == "--lca");
-    if lca {
-        let t = Instant::now();
-        h.top_down();
-        let (tiles, exits, cells) = h.table_size();
-        println!("top-down: {tiles} tile tables, {exits} exits, {cells} table cells, {:.3} s", t.elapsed().as_secs_f64());
+    println!("witness search: {} of {} shortcut pairs not needed", h.witnessed.iter().sum::<usize>(), h.shortcuts.iter().sum::<usize>());
+    if args.iter().any(|a| a == "--degrees") {
+        let d = h.degrees();
+        let (nn, na) = d.iter().fold((0, 0), |a, x| (a.0 + x.0, a.1 + x.1));
+        println!("degree: mean {:.2} arcs out of each node ({nn} nodes, {na} arcs)", na as f64 / nn as f64);
+        for (z, &(k, all, up, max)) in d.iter().enumerate() {
+            if k > 0 {
+                println!("  zoom {z:2}: {k:8} nodes, mean out-degree {:7.1}, mean forward-search degree {:7.1}, largest {max}", all as f64 / k as f64, up as f64 / k as f64);
+            }
+        }
     }
-    let h = h;
-    // the triangle version (a customizable contraction hierarchy, order from the tiles)
-    let tri = if args.iter().any(|a| a == "--cch") {
-        let t = Instant::now();
-        let mut c = Cch::new(n, &net.turns, &net.level, &net.cell);
-        let all = t.elapsed().as_secs_f64();
-        let t = Instant::now();
-        c.customize();
-        let cust = t.elapsed().as_secs_f64();
-        let (edges, only) = c.size();
-        println!(
-            "triangles: {edges} edges ({only} shortcuts only), structure and first costs {all:.3} s, a full customization {cust:.3} s"
-        );
-        Some(c)
-    } else {
-        None
-    };
-    let route = |s: u32, t: u32| match &tri {
-        Some(c) => c.route(s, t),
-        None if lca => h.route_lca(s, t).0,
+    let (k, sum) = h.inner.iter().fold((0u64, 0u64), |a, x| (a.0 + x.0, a.1 + x.1));
+    println!("inner nodes of a shortcut path: mean {:.2} over {k} pairs, largest {}", sum as f64 / k.max(1) as f64, h.inner.iter().map(|x| x.2).max().unwrap_or(0));
+    for (z, &(k, sum, max)) in h.inner.iter().enumerate() {
+        if k > 0 {
+            println!("  zoom {z:2}: mean {:.2}, largest {max}", sum as f64 / k as f64);
+        }
+    }
+    // what a query server keeps: the hierarchy and the edge ids (8 bytes and about 16 bytes of index for each node)
+    let ids_bytes = n * 8 + n * 16;
+    println!(
+        "query data: hierarchy {:.0} MB + edge ids {:.0} MB = {:.0} MB; process now {} (after the preparation)",
+        h.query_bytes() as f64 / 1e6,
+        ids_bytes as f64 / 1e6,
+        (h.query_bytes() + ids_bytes) as f64 / 1e6,
+        rss()
+    );
+    let limit: Option<u8> = args.iter().position(|a| a == "--limit").and_then(|i| args.get(i + 1)).and_then(|x| x.parse().ok());
+    let route = |s: u32, t: u32| match limit {
+        Some(k) => h.route_limited(s, t, k),
         None => h.route(s, t),
     };
 
     // the pairs: all, or N random ones (a fixed sequence)
-    let pairs: Vec<(u32, u32)> = match opt("--pairs", "").parse::<usize>() {
+    let from_file = args.iter().position(|a| a == "--pairs-file").and_then(|i| args.get(i + 1));
+    let pairs: Vec<(u32, u32)> = if let Some(path) = from_file {
+        // a CSV with the duckOSM edge ids of the start and the target in its first two columns, and a header line
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let node = |id: &str| -> Result<u32, String> {
+            let id: i64 = id.trim().parse().map_err(|e| format!("{path}: {e}"))?;
+            net.graph.index_of(id).map(|i| i as u32).ok_or(format!("{path}: edge {id} is not in the graph"))
+        };
+        text.lines().skip(1).filter(|l| !l.is_empty()).map(|l| {
+            let mut f = l.split(',');
+            Ok((node(f.next().unwrap_or(""))?, node(f.next().unwrap_or(""))?))
+        }).collect::<Result<_, String>>()?
+    } else { match opt("--pairs", "").parse::<usize>() {
         Ok(k) => {
             let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
             let mut next = || {
@@ -87,7 +122,7 @@ fn run() -> Result<(), String> {
             (0..k).map(|_| (next(), next())).collect()
         }
         Err(_) => (0..n as u32).flat_map(|s| (0..n as u32).map(move |t| (s, t))).collect(),
-    };
+    } };
     let weight: std::collections::HashMap<(u32, u32), f64> = net.turns.iter().map(|&(u, w, c)| ((u, w), c)).collect();
 
     // each query is timed alone; the mean is the time of one query on one thread
@@ -102,11 +137,23 @@ fn run() -> Result<(), String> {
     });
     // the tiles (cells) that one query settles, on average
     let mean = |f: &(dyn Fn(u32, u32) -> usize + Sync)| pairs.par_iter().map(|&(s, t)| f(s, t)).sum::<usize>() as f64 / pairs.len().max(1) as f64;
-    let tiles_up = mean(&|s, t| h.route_stats(s, t).1);
-    if lca {
-        println!("tiles per query: {tiles_up:.1} (search up), {:.1} (top-down, pruned at the LCA)", mean(&|s, t| h.route_lca(s, t).1));
-    } else {
-        println!("tiles per query: {tiles_up:.1}");
+    println!("tiles per query: {:.1}", mean(&|s, t| h.route_stats(s, t).1));
+    if args.iter().any(|a| a == "--profile") {
+        let by = h.arcs_by_level(&pairs);
+        let all: usize = by.iter().sum();
+        let line: Vec<String> = by.iter().enumerate().filter(|(_, &x)| x > 0).map(|(z, &x)| format!("{z}:{:.0}%", x as f64 * 100.0 / all as f64)).collect();
+        println!("arcs opened by the level of the settled node: {}", line.join(" "));
+        let rows: Vec<(usize, f64, f64, usize, usize)> = pairs.iter().map(|&(s, t)| h.profile(s, t)).collect();
+        let k = rows.len().max(1) as f64;
+        let sum = |f: &dyn Fn(&(usize, f64, f64, usize, usize)) -> f64| rows.iter().map(f).sum::<f64>() / k;
+        println!(
+            "profile (one thread): {:.0} nodes settled, {:.0} arcs opened, search {:.3} ms, unpack {:.3} ms, {:.0} nodes on the path",
+            sum(&|r| r.0 as f64),
+            sum(&|r| r.4 as f64),
+            sum(&|r| r.1) * 1e3,
+            sum(&|r| r.2) * 1e3,
+            sum(&|r| r.3 as f64)
+        );
     }
     let ids = &net.graph.ids;
     if let Some(path) = args.iter().position(|a| a == "--write-pairs").and_then(|i| args.get(i + 1)) {
@@ -148,6 +195,19 @@ fn run() -> Result<(), String> {
             _ => bad.push(i),
         }
     }
+    if limit.is_some() {
+        // how much longer the wrong routes are
+        let extra: Vec<f64> = bad.iter().filter_map(|&i| match (&ours[i], &refs[i]) {
+            (Some((d, _)), Some((rd, _))) if *rd > 0.0 => Some(d / rd - 1.0),
+            _ => None,
+        }).collect();
+        let lost = bad.iter().filter(|&&i| ours[i].is_none() && refs[i].is_some()).count();
+        let mean = extra.iter().sum::<f64>() / extra.len().max(1) as f64;
+        let max = extra.iter().cloned().fold(0.0, f64::max);
+        println!("limit: {} routes longer (mean +{:.2}%, largest +{:.1}%), {lost} routes not found", extra.len(), mean * 100.0, max * 100.0);
+        println!("time per query (one thread): tileroute {ms_ours:.3} ms");
+        return Ok(());
+    }
     println!(
         "pairs: {} | same path {same} | tie (other path, equal cost) {tie} | no path {none} | wrong {}",
         pairs.len(),
@@ -158,77 +218,5 @@ fn run() -> Result<(), String> {
         let (s, t) = pairs[i];
         println!("  wrong: {} -> {}: ours {:?}, duckOSM {:?}", ids[s as usize], ids[t as usize], ours[i].as_ref().map(|x| x.0), refs[i].as_ref().map(|x| x.0));
     }
-    if !bad.is_empty() {
-        return Err(format!("{} wrong routes", bad.len()));
-    }
-    if let (Some(c), Some(list)) = (&tri, args.iter().position(|a| a == "--changes").and_then(|i| args.get(i + 1))) {
-        for k in list.split(',') {
-            let k: usize = k.parse().map_err(|e| format!("--changes: {e}"))?;
-            update_test(c, &net, k)?;
-        }
-    }
-    Ok(())
-}
-
-/// Change the travel time of `k` random road edges (the cost of all arcs out of each: half of them x 1.5, the other
-/// half x 0.6), update the costs, and check: the same costs as a full customization, and the same routes as duckOSM's
-/// router on the changed graph.
-fn update_test(c: &Cch, net: &load::Network, k: usize) -> Result<(), String> {
-    let n = net.graph.n_nodes();
-    let mut x: u64 = 0xD1B5_4A32_D192_ED03 ^ k as u64;
-    let mut next = || {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        x
-    };
-    let mut factor: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
-    while factor.len() < k.min(n) {
-        let v = (next() % n as u64) as u32;
-        let f = if factor.len() % 2 == 0 { 1.5 } else { 0.6 };
-        factor.entry(v).or_insert(f);
-    }
-    // the new arc costs: f32 values, as in the database
-    let turns: Vec<(u32, u32, f64)> = net
-        .turns
-        .iter()
-        .map(|&(u, w, cost)| (u, w, factor.get(&u).map_or(cost, |f| (cost * f) as f32 as f64)))
-        .collect();
-    let changes: Vec<(u32, u32, f64)> = turns.iter().zip(&net.turns).filter(|(a, b)| a.2 != b.2).map(|(a, _)| *a).collect();
-
-    let mut upd = c.clone();
-    let t = Instant::now();
-    let redone = upd.update(&changes);
-    let t_upd = t.elapsed().as_secs_f64();
-    let mut full = c.clone();
-    for &(a, b, w) in &changes {
-        full.set_base(a, b, w);
-    }
-    let t = Instant::now();
-    full.customize();
-    let t_full = t.elapsed().as_secs_f64();
-    let same = upd.same_costs(&full);
-
-    // routes on the changed graph against duckOSM's router with the same arcs
-    let ids = &net.graph.ids;
-    let g = duckosm_router::graph::Graph::from_arcs(turns.iter().map(|&(u, w, cost)| (ids[u as usize], ids[w as usize], cost)));
-    let mut wrong = 0usize;
-    for _ in 0..1000 {
-        let (s, t) = ((next() % n as u64) as u32, (next() % n as u64) as u32);
-        let ours = upd.route(s, t).map(|r| r.0);
-        let theirs = g.bidirectional_dijkstra(ids[s as usize], ids[t as usize]).ok().flatten().map(|r| r.0);
-        if ours != theirs {
-            wrong += 1;
-        }
-    }
-    println!(
-        "update: {k} road edges ({} arcs) changed | {redone} edges computed again in {:.3} ms | full customization {:.1} ms | same costs: {same} | 1000 routes on the changed graph: {wrong} wrong",
-        changes.len(),
-        t_upd * 1e3,
-        t_full * 1e3
-    );
-    if !same || wrong > 0 {
-        return Err("the update is wrong".into());
-    }
-    Ok(())
+    if bad.is_empty() { Ok(()) } else { Err(format!("{} wrong routes", bad.len())) }
 }

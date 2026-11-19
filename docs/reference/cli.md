@@ -23,9 +23,10 @@ tileroute check kentucky.duckdb --mode driving --pairs 10000
 | `--mode` | `driving` | The duckOSM mode: `driving`, `walking` or `cycling` |
 | `--finest` | `20` | The finest level. A road edge with a higher `lca_zoom` gets this level. |
 | `--pairs N` | all pairs | Compare N random pairs (a fixed sequence). `0`: make the shortcuts only. |
-| `--lca` | off | Also run the top-down phase, and answer with the pruned query ([The top-down phase](../explanation/top-down.md)) |
-| `--cch` | off | Use the triangle version (a customizable contraction hierarchy) ([Updates](../explanation/updates.md)) |
-| `--changes K,K,...` | none | With `--cch`: change K random road edges, update, and check the costs and 1,000 routes on the changed graph |
+| `--pairs-file CSV` | none | Use these pairs: a CSV with the duckOSM edge ids of the start and the target in its first two columns, and a header line |
+| `--profile` | off | Print where the time of a query goes: nodes settled, search time, unpack time |
+| `--limit K` | none | An experiment, not exact: the search may not go above the ancestor K zooms coarser than the common tile of the start and the target; prints how many routes become longer |
+| `--core Z` | 0 | Stop the steps at zoom Z; the coarser nodes stay as one graph that the query searches in both directions (an experiment; slower on Kentucky) |
 | `--no-reference` | off | Do not compare with duckOSM's router; print only tileroute's time per query |
 | `--write-pairs FILE` | none | Write the pairs and tileroute's costs as CSV (`source,target,cost`), for other routers |
 
@@ -33,4 +34,4 @@ The command reads the tile columns of duckOSM (`edges.from_tile`, `edges.to_tile
 not, it gets the tiles from the node points (it needs DuckDB's `spatial` extension).
 
 It prints the number of nodes and arcs, the shortcuts and the step times for each zoom, the tiles per query, the
-result of the comparison, and the time for one query. It stops with exit code 2 if a route or an update is wrong.
+result of the comparison, and the time for one query. It stops with exit code 2 if a route is wrong.

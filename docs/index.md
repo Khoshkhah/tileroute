@@ -25,6 +25,7 @@ only the tiles that it needs, so that a country does not need all of its graph i
 | How driving uses predicted traffic for each time | [Predicted traffic](explanation/predicted-traffic.md) |
 | What comes next, and in which order | [Plan](plan.md) |
 | How tileroute is different from h3-routing-platform | [Comparison with h3-routing-platform](explanation/comparison.md) |
+| How tileroute is different from OSRM, GraphHopper, Valhalla | [Comparison with other routers](explanation/engines.md) |
 | How to run it | [The command line](reference/cli.md) |
 | Time, memory and checks | [Measurements](reference/measurements.md) |
 
