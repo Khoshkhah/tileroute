@@ -1,8 +1,10 @@
 # A structure with no costs (customization)
 
 !!! note "Status"
-    Measured in memory on Monaco and Kentucky: `tileroute check --partition 16 --cch`. Not yet in the tile files and
-    not yet the default. The code is in [src/cch.rs](https://github.com/Khoshkhah/tileroute/blob/main/src/cch.rs).
+    Measured on Monaco and Kentucky, in memory (`tileroute check --partition 16 --cch`) and from the tile files
+    (`tileroute build --cch`, `tileroute route --metric`). Not yet the default. The code is in
+    [src/cch.rs](https://github.com/Khoshkhah/tileroute/blob/main/src/cch.rs) and
+    [src/cchdisk.rs](https://github.com/Khoshkhah/tileroute/blob/main/src/cchdisk.rs).
 
 ## The problem
 
@@ -97,6 +99,43 @@ WSL PC, the same 2,000 pairs, one thread, in memory, `check --partition 16 --cch
   search and the query reads the shared structure with a mask. A separate copy of the needed arcs for each cost
   gave 0.26 ms, but it costs 268 MB for each cost on Kentucky; the mask costs 4.6 MB.
 
+## In the tile files
+
+One folder holds the shared structure and one sub-folder for each metric:
+
+```text
+folder/
+  index.bin, edges.idx    the files and the node of each duckOSM edge id (as for the hierarchy)
+  structure/8_x_y.trt     for each node: its rank, its edge id, its higher neighbours (shared by all metrics)
+  time/8_x_y.trt          for each edge of structure/8_x_y.trt, in the same order: two costs, two middle nodes, two mask bits
+  length/8_x_y.trt        the same for the metric "length"
+```
+
+The files are the zoom-8 XYZ tiles (`--xyz-files`) or the partition cells, and the top file, as for the hierarchy. A
+new set of costs writes only its own folder; the structure does not change.
+
+```bash
+tileroute build area.duckdb -o folder --partition 16 --xyz-files --cch --metrics time,length
+tileroute route folder --metric time --pairs-file pairs.csv
+```
+
+**Kentucky** (WSL PC, the same 10,000 pairs, one thread):
+
+| | Value |
+|---|---|
+| Build (in memory): read, structure 0.8 s, two customizations 2.4 s and 2.3 s, files 1.9 s | 17.7 s, peak 2.5 GB |
+| `structure/` | 104 MB (shared) |
+| `time/`, `length/` | 428 MB each |
+| One query from the files, metric time | 0.39 ms, 4.5 files read |
+| One query from the files, metric length | 0.54 ms, 4.5 files read |
+| Memory of the query process | 590 MB (pages of the mapped files) |
+| Routes from the files = routes in memory (time) | 2,000 of 2,000 |
+
+The queries of the metric length are slower: with length as the cost, the search reaches more nodes before it can
+stop. Each metric folder is 4 times the size of the structure: two costs (f64) and two middle nodes for each edge. A
+smaller form is a next step: f32 costs where the sums stay exact, or no middle nodes (the unpack then finds the middle
+node from the triangles).
+
 ## Weights for each query: the best of a few routes
 
 A query can give its own weights: cost = w₁ · time + w₂ · length + … A customization for each query takes seconds,
@@ -149,6 +188,7 @@ fewer edges (2.6 times), and the full customization is faster than the steps.
 |---|---|
 | The customization in parallel, by depth of the elimination tree | Kentucky: the customization below 1 s |
 | A faster query on the shared structure: the costs of one direction next to the node numbers, f32 costs | Kentucky: near 0.26 ms with the mask |
-| The structure and the costs in the tile files (the costs as a separate file of numbers for each metric) | a new set of costs writes only the cost file; the routes from the files are equal to memory |
+| A smaller metric folder (f32 costs, no middle nodes) | Kentucky: a metric folder below 200 MB |
+| The build of the structure and the customization one cell at a time, from disk | France on the Mac mini |
 | Travel-time tables: one cost file for each hour on one structure | [Predicted traffic](predicted-traffic.md) with one structure |
 | France on the Mac mini | customization time, edges, query time next to the hierarchy |

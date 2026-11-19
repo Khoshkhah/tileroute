@@ -20,8 +20,8 @@ use std::collections::{BinaryHeap, HashMap};
 pub struct Cch {
     pub order: Vec<u32>,
     pub rank: Vec<u32>,
-    off: Vec<u32>,
-    up: Vec<u32>,
+    pub(crate) off: Vec<u32>,
+    pub(crate) up: Vec<u32>,
     /// the rank of the level of each rank (for the parallel customization: the levels of the elimination tree)
     depth: Vec<u32>,
 }
@@ -73,7 +73,7 @@ impl Cch {
         4 * (self.up.len() + self.off.len() + 2 * self.order.len())
     }
 
-    fn row(&self, r: u32) -> std::ops::Range<usize> {
+    pub(crate) fn row(&self, r: u32) -> std::ops::Range<usize> {
         self.off[r as usize] as usize..self.off[r as usize + 1] as usize
     }
 
@@ -175,12 +175,12 @@ impl Cch {
 /// The costs of one metric on a [`Cch`].
 pub struct Metric<'a> {
     cch: &'a Cch,
-    up: Vec<f64>,
-    down: Vec<f64>,
-    via_up: Vec<u32>,
-    via_down: Vec<u32>,
+    pub(crate) up: Vec<f64>,
+    pub(crate) down: Vec<f64>,
+    pub(crate) via_up: Vec<u32>,
+    pub(crate) via_down: Vec<u32>,
     /// for the forward and the backward search: one bit for each edge, set when the search uses it
-    keep: [Vec<u64>; 2],
+    pub(crate) keep: [Vec<u64>; 2],
     /// the search arcs before and after the arc reduction
     pub before: usize,
     pub kept: usize,

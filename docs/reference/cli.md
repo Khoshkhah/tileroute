@@ -28,6 +28,7 @@ tileroute check kentucky.duckdb --mode driving --pairs 10000
 | `--limit K` | none | An experiment, not exact: the search may not go above the ancestor K zooms coarser than the common tile of the start and the target; prints how many routes become longer |
 | `--core Z` | 0 | Stop the steps at zoom Z; the coarser nodes stay as one graph that the query searches in both directions (an experiment; slower on Kentucky) |
 | `--weights` | off | With `--partition`: the estimate for weights in each query (the best of the time, the length and the 50/50 routes) against the exact route of 9 mixes ([Weights for each query](../explanation/customization.md#weights-for-each-query-the-best-of-a-few-routes)) |
+| `--cch-files DIR` | off | With `--cch`: also compare the routes of a folder of `build --cch` (metric time) with the routes in memory |
 | `--cch` | off | Also make the structure with no costs and its customization, and compare its routes with the hierarchy ([A structure with no costs](../explanation/customization.md)); `--no-reduce`: no arc reduction after the customization |
 | `--partition LEAF` | off | The cells from the inertial flow partition of the road graph, not from the XYZ tiles; cut until a cell has at most LEAF junctions (for example 16) ([The whole world](../explanation/partition.md)) |
 | `--no-reference` | off | Do not compare with duckOSM's router; print only tileroute's time per query |
@@ -53,6 +54,8 @@ tileroute build kentucky.duckdb -o kentucky.tiles
 | `-o DIR` | (necessary) | The folder for the files. The command makes it if it does not exist. |
 | `--mode` | `driving` | The duckOSM mode |
 | `--finest` | `20` | The finest level |
+| `--cch` | off | Write the structure with no costs and one folder of costs for each metric, not the hierarchy (in memory) ([In the tile files](../explanation/customization.md#in-the-tile-files)) |
+| `--metrics LIST` | `time` | With `--cch`: the metrics, comma separated: `time`, `length` |
 | `--by-tile` | off | Prepare one zoom-8 tile at a time, with much less memory ([The preparation tile by tile](../explanation/build-by-tile.md)); the files are the same format |
 | `--xyz-files` | off | With `--partition` (in memory or `--by-tile`): one file for each zoom-8 XYZ tile, not for each partition cell ([The three versions](../explanation/partition.md#the-three-versions)) |
 | `--partition LEAF` | off | With `--by-tile`: the cells from the partition, as for `check` |
@@ -83,6 +86,9 @@ tileroute route kentucky.tiles --pairs-file points2000.csv
 |---|---|---|
 | `--pairs-file CSV` | (necessary) | The pairs: the duckOSM edge ids of the start and the target in the first two columns, and a header line |
 | `--cache N` | `64` | The number of open (memory-mapped) tile files that the process keeps |
+| `--metric NAME` | off | Read a folder of `build --cch`, with the costs of this metric |
+| `--random N` | off | N random pairs from `edges.idx`, in place of `--pairs-file` |
+| `--write CSV` | off | Write the cost of each pair |
 
 It answers all pairs two times on one thread. The first pass maps the files; in the second pass the files are in the
 cache of the operating system. For each pass it prints the time for one query, and the tiles and bytes that one query

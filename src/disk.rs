@@ -73,6 +73,7 @@ unsafe impl Pod for u8 {}
 unsafe impl Pod for u32 {}
 unsafe impl Pod for u64 {}
 unsafe impl Pod for i64 {}
+unsafe impl Pod for f64 {}
 unsafe impl Pod for SArc {}
 unsafe impl Pod for AArc {}
 
@@ -80,7 +81,7 @@ pub fn bytes_of<T: Pod>(xs: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs)) }
 }
 
-fn cast<T: Pod>(b: &[u8]) -> &[T] {
+pub(crate) fn cast<T: Pod>(b: &[u8]) -> &[T] {
     let size = std::mem::size_of::<T>();
     assert!((b.as_ptr() as usize).is_multiple_of(std::mem::align_of::<T>()) && b.len().is_multiple_of(size), "a section is not aligned");
     unsafe { std::slice::from_raw_parts(b.as_ptr() as *const T, b.len() / size) }
@@ -138,7 +139,7 @@ pub fn file_name(key: u64) -> String {
 }
 
 /// A read-only memory map of a file.
-struct Map {
+pub(crate) struct Map {
     ptr: *mut libc::c_void,
     len: usize,
 }
@@ -147,7 +148,7 @@ unsafe impl Send for Map {}
 unsafe impl Sync for Map {}
 
 impl Map {
-    fn open(path: &Path) -> io::Result<Map> {
+    pub(crate) fn open(path: &Path) -> io::Result<Map> {
         use std::os::fd::AsRawFd;
         let f = File::open(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
         let len = f.metadata()?.len() as usize;
@@ -161,7 +162,7 @@ impl Map {
         Ok(Map { ptr, len })
     }
 
-    fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len) }
     }
 }
@@ -172,15 +173,15 @@ impl Drop for Map {
     }
 }
 
-fn bad(path: &Path, what: &str) -> io::Error {
+pub(crate) fn bad(path: &Path, what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{}: {what}", path.display()))
 }
 
-fn u64_at(b: &[u8], at: usize) -> u64 {
+pub(crate) fn u64_at(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(b[at..at + 8].try_into().expect("8 bytes"))
 }
 
-fn u32_at(b: &[u8], at: usize) -> u32 {
+pub(crate) fn u32_at(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(b[at..at + 4].try_into().expect("4 bytes"))
 }
 
@@ -235,7 +236,7 @@ pub struct Stats {
 
 /// A fast hash for node numbers (the labels of a query).
 #[derive(Default)]
-struct NodeHash(u64);
+pub(crate) struct NodeHash(u64);
 impl Hasher for NodeHash {
     fn finish(&self) -> u64 {
         self.0
@@ -250,11 +251,11 @@ impl Hasher for NodeHash {
         self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
     }
 }
-type Labels = HashMap<u32, (f64, u32), BuildHasherDefault<NodeHash>>;
+pub(crate) type Labels = HashMap<u32, (f64, u32), BuildHasherDefault<NodeHash>>;
 
 /// A heap entry, the smallest distance first; a tie takes the smaller node (as `hier`).
 #[derive(PartialEq)]
-struct Key(f64, u32);
+pub(crate) struct Key(pub(crate) f64, pub(crate) u32);
 impl Eq for Key {}
 impl Ord for Key {
     fn cmp(&self, o: &Self) -> Ordering {
