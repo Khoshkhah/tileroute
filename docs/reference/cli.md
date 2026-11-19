@@ -54,8 +54,8 @@ tileroute build kentucky.duckdb -o kentucky.tiles
 | `-o DIR` | (necessary) | The folder for the files. The command makes it if it does not exist. |
 | `--mode` | `driving` | The duckOSM mode |
 | `--finest` | `20` | The finest level |
-| `--cch` | off | Write the structure with no costs and one folder of costs for each metric, not the hierarchy (in memory) ([In the tile files](../explanation/customization.md#in-the-tile-files)) |
-| `--metrics LIST` | `time` | With `--cch`: the metrics, comma separated: `time`, `length` |
+| `--cch` | off | Write the structure with no costs and one folder of costs for each metric, not the hierarchy (in memory; with `--by-tile --partition`, one unit at a time) ([In the tile files](../explanation/customization.md#in-the-tile-files)) |
+| `--metrics LIST` | `time` | With `--cch`: the metrics, comma separated: `time`, `length`, `mixNN` (NN% time and the rest length, each divided by its mean) |
 | `--by-tile` | off | Prepare one zoom-8 tile at a time, with much less memory ([The preparation tile by tile](../explanation/build-by-tile.md)); the files are the same format |
 | `--xyz-files` | off | With `--partition` (in memory or `--by-tile`): one file for each zoom-8 XYZ tile, not for each partition cell ([The three versions](../explanation/partition.md#the-three-versions)) |
 | `--partition LEAF` | off | With `--by-tile`: the cells from the partition, as for `check` |
@@ -93,3 +93,21 @@ tileroute route kentucky.tiles --pairs-file points2000.csv
 It answers all pairs two times on one thread. The first pass maps the files; in the second pass the files are in the
 cache of the operating system. For each pass it prints the time for one query, and the tiles and bytes that one query
 reads. At the end it prints the peak memory of the process.
+
+## tileroute weigh
+
+The weighted query from a folder of `build --cch`: for a mix l, the cost of a route is l · time / mean time +
+(1 − l) · length / mean length. The candidate metrics are searched in parallel; the route with the smallest cost for
+l wins. Each exact metric `mixNN` gives l = NN / 100 and the error of the estimate.
+
+```bash
+tileroute weigh folder --pairs-file pairs.csv --candidates time,length,mix50 --exact mix30,mix70
+```
+
+## tileroute reference
+
+The cost of each pair with duckOSM's router only (-1: no path), for an area that is too large for `check`.
+
+```bash
+tileroute reference area.duckdb pairs.csv reference.csv --max 100
+```

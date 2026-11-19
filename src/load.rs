@@ -152,10 +152,9 @@ pub fn partition_levels(con: &Connection, mode: &str, finest: u8, leaf: usize, m
     Ok(cuts)
 }
 
-/// [`read`], with the cells from the partition when `leaf` is given (see [`partition_levels`]).
-pub fn read_with(db: &Path, mode: &str, finest: u8, leaf: Option<usize>) -> Result<Network> {
-    let con = open(db)?;
-    let relation = relation(&con, mode)?;
+/// duckOSM's graph of a mode (networkx order): the reference router.
+pub fn graph(con: &Connection, mode: &str) -> Result<Graph> {
+    let relation = relation(con, mode)?;
     let mut b = GraphBuilder::default();
     {
         let mut st = con.prepare(&format!("SELECT from_edge, to_edge, cost::DOUBLE FROM {relation}")).map_err(err)?;
@@ -165,7 +164,13 @@ pub fn read_with(db: &Path, mode: &str, finest: u8, leaf: Option<usize>) -> Resu
             b.add_arc(r.get(0).map_err(err)?, r.get(1).map_err(err)?, w.unwrap_or(f64::NAN));
         }
     }
-    let graph = b.finish();
+    Ok(b.finish())
+}
+
+/// [`read`], with the cells from the partition when `leaf` is given (see [`partition_levels`]).
+pub fn read_with(db: &Path, mode: &str, finest: u8, leaf: Option<usize>) -> Result<Network> {
+    let con = open(db)?;
+    let graph = graph(&con, mode)?;
     let turns: Vec<(u32, u32, f64)> = graph
         .arcs()
         .filter(|a| !a.2.is_nan())

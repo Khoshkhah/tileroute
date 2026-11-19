@@ -115,7 +115,7 @@ impl Local {
 
 /// The arcs of a bucket file, each pair once (the last row of a pair counts, as in duckOSM's router; an arc with no
 /// cost is left out).
-fn read_bucket(path: &Path) -> io::Result<Vec<(u32, u32, f64)>> {
+pub(crate) fn read_bucket(path: &Path) -> io::Result<Vec<(u32, u32, f64)>> {
     let mut b = Vec::new();
     if path.exists() {
         BufReader::new(File::open(path)?).read_to_end(&mut b)?;
