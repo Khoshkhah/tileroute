@@ -43,20 +43,36 @@ no arc at all.
 
 ## Measured on the same input
 
-| Area | h3 time | tileroute time | h3 memory | tileroute memory | h3 shortcuts | tileroute shortcuts |
+All runs on 2026-11-18 on the same PC (WSL, 20 cores, 23 GB), one run at a time, driving, the same duckOSM databases.
+
+**Making the shortcuts**
+
+| Area | h3-routing-platform: time | h3-routing-platform: memory | tileroute: time | tileroute: memory | h3 shortcuts | tileroute shortcuts |
 |---|---|---|---|---|---|---|
-| Somerset | 34 s ¹ | 0.09 s | — | 59 MB | 527,396 | 36,760 |
-| Burnaby | 61.5 s ² | 0.25 s | 6.7 GB ² | 124 MB | 4,708,820 | 241,245 |
-| Vancouver city | 4 min 56 s ¹ | 1.2 s | — | 282 MB | 13,970,530 | 953,742 |
-| Metro Vancouver | 21 min 13 s ¹ | 3.9 s | — | 917 MB | 61,501,123 | 3,026,705 |
+| Somerset | 24.4 s | 2.3 GB | 0.04 s | 63 MB | 527,396 | 36,760 |
+| Burnaby | 61.5 s | 6.7 GB | 0.2 s | 123 MB | 4,708,820 | 241,245 |
+| Vancouver city | 188 s | 11.4 GB | 1.5 s | 274 MB | 13,970,530 | 953,742 |
+| Metro Vancouver | 953 s | 22.3 GB | 3.6 s | 873 MB | 61,501,123 | 3,026,705 |
 
-¹ From the logs of h3-routing-platform (January 2026). These logs give the memory of the main process only, not of its
-10 workers, so the memory is not shown.
-² Measured on 2026-11-18 on the same PC as tileroute (20 cores), with the settings of its Burnaby config (10 workers,
-HYBRID). The memory is the sum of all processes.
+- h3-routing-platform: its own settings (10 workers, HYBRID); memory = the sum of all its processes.
+- tileroute: time = the shortcut steps (20 threads); memory = the peak of a whole run (read, shortcuts, 10,000 queries).
 
-!!! warning "What this table does not show"
-    The two programs do different work: h3-routing-platform computes many more shortcuts. So the table compares the two
-    methods as a whole, not the same algorithm in two languages. The next step is to port h3-routing-platform's exact
-    method to Rust, check that it gives the same 4,708,820 shortcuts on Burnaby, and then compare the time, the memory
-    and the query speed of the two shortcut rules on the same graph.
+**Answering queries** (one thread, 10,000 random pairs, the same pairs for both)
+
+| Area | h3 C++ `pruned`: per query | h3: load | h3: memory | tileroute: per query | tileroute: memory |
+|---|---|---|---|---|---|
+| Somerset | 2.5 ms | 0.2 s | 112 MB | 0.14 ms | 63 MB |
+| Burnaby | 17.9 ms | 2.5 s | 598 MB | 0.63 ms | 123 MB |
+| Vancouver city | 69.5 ms | 8.1 s | 1.5 GB | 2.5 ms | 274 MB |
+| Metro Vancouver | 236.1 ms | 39.6 s | 6.5 GB | 5.2 ms | 873 MB |
+
+- Both give the correct cost for all 10,000 pairs in each area. The h3 engine was checked with its own test program
+  (`test_routing`) against the costs of duckOSM's router.
+- h3: load = the time to read its shortcut table; memory = the peak of `test_routing`.
+- tileroute: memory = the peak of the whole run, which also makes the shortcuts.
+
+!!! info "What this comparison shows"
+    The two programs use different shortcut rules: h3-routing-platform keeps shortcuts between all pairs of a cell, at
+    each resolution, and computes them in SQL and Python; tileroute keeps only the shortcuts around each removed set and
+    computes them in Rust. So the table compares the two methods as a whole. An exact Rust port of the h3 method was
+    not made: with the top-down results ([The top-down phase](top-down.md)), it is not necessary for the plan.

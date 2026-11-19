@@ -71,21 +71,22 @@ Changes: random road edges, half of them × 1.5, the other half × 0.6.
 | Vancouver city | 3,283,616 (3,091,832) | 4.6 s | 0.10 ms | 568 ms | 3.45 s | 23.2 s |
 | Metro Vancouver | 11,977,843 (11,124,484) | 21 s | 0.8 ms | 120 ms | see Measurements | see Measurements |
 
-## What this means
+## The decision: rebuild all
 
-| Case | Best version |
-|---|---|
-| A few changed road edges (1 to 10) | Version 2: below 1 ms to 0.6 s, against seconds for a full run |
-| Many changes (100 or more, for example one hour of traffic for a city) | A full run of the set version (3.6 s on 20 threads for Metro Vancouver) |
+| Case | Version 2 (triangles) | Rebuild all (set version, 20 threads) |
+|---|---|---|
+| 1 to 10 changed road edges | below 1 ms to 0.6 s | 0.2 s (Burnaby) to 14 s (Kentucky) |
+| 100 or more (for example one hour of traffic) | slower than a rebuild | 3.6 s (Metro Vancouver) |
+| Memory | about 4 times the edges of the set version | as today |
 
-Version 2 has two weak points:
+Real traffic changes many road edges at the same time. The set version is fast because its steps run on all threads,
+and it needs no extra structure. So **tileroute rebuilds all shortcut costs** when the costs change:
 
-- **Its structure is large.** It has 12 million edges for Metro Vancouver, against 3 million shortcuts in the set
-  version, so it needs much more memory. The reason is the order inside a set: the nodes are by node number, which makes
-  many extra edges.
-- **Its full customization runs on one thread.**
+- The structure (tiles, levels, sets, shortcut places) stays; only the costs (or the vectors of
+  [Weights](weights.md)) are made again.
+- The rebuild runs on a schedule, for example every 15 minutes or every hour, and writes new tile files.
+- For a country, the rebuild time must be measured (France). If it is too long, a rebuild by region (one zoom-8 tile
+  and its ancestors) is the next step.
 
-Two known fixes are not made yet:
-
-- a better order inside each set (a geometric order along the tile borders);
-- a parallel full customization, level by level.
+Version 2 and the top-down phase stay recorded on these pages, and the code stays in git history; the plan is to remove
+them from the code ([Plan](../plan.md)).

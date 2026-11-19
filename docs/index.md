@@ -6,8 +6,8 @@ only the tiles that it needs, so that a country does not need all of its graph i
 
 !!! note "Status, 2026-11-18"
     The shortcuts and the query work in memory. Each route is equal to the route of duckOSM's router (Monaco: all
-    7.6 million pairs; Kentucky and four Vancouver areas: 10,000 random pairs each). The tile files on disk and the
-    browser version are not made yet.
+    7.6 million pairs; Kentucky and four Vancouver areas: 10,000 random pairs each). The tile files on disk, the
+    browser version, the weights, the combined modes and the timetable are designed ([Plan](plan.md)), not made yet.
 
 ## Start
 
@@ -19,6 +19,11 @@ only the tiles that it needs, so that a country does not need all of its graph i
 | How a query uses the shortcuts | [The shortest path](explanation/query.md) |
 | What the top-down phase gives | [The top-down phase](explanation/top-down.md) |
 | How to update the shortcuts after new costs | [Updates](explanation/updates.md) |
+| How a query uses its own weights for many items | [Weights](explanation/weights.md) |
+| How driving, walking and cycling combine | [Modes](explanation/modes.md) |
+| How trains and buses join the walking routes | [Timetable](explanation/timetable.md) |
+| How driving uses predicted traffic for each time | [Predicted traffic](explanation/predicted-traffic.md) |
+| What comes next, and in which order | [Plan](plan.md) |
 | How tileroute is different from h3-routing-platform | [Comparison with h3-routing-platform](explanation/comparison.md) |
 | How to run it | [The command line](reference/cli.md) |
 | Time, memory and checks | [Measurements](reference/measurements.md) |
