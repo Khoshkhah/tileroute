@@ -4,8 +4,12 @@
 //! | Path | Holds |
 //! |---|---|
 //! | `index.bin`, `edges.idx` | as in `crate::disk`: the files (first node, nodes, key), and the node of each duckOSM edge id |
-//! | `structure/<file>` | for each node: its rank, its edge id, and its higher neighbours (node numbers, sorted) |
-//! | `<metric>/<file>` | for each edge of `structure/<file>`, in the same order: the cost up and down, the middle node up and down, and one bit for each direction (does the search use this edge) |
+//! | `structure/<file>` | for each node: its rank, its edge id, its items (time and length of the road edge), its higher neighbours and its lower neighbours (node numbers, sorted) |
+//! | `<metric>/<file>` | for each edge of `structure/<file>` (the higher neighbours), in the same order: the cost up and down, and one bit for each direction (does the search use this edge) |
+//!
+//! The metric has no middle nodes: the unpack finds the middle node x of an edge a – b from the lower neighbours of
+//! the lower end, with cost(a → x) + cost(x → b) = cost(a → b). On a tie between paths of equal cost, the path can
+//! differ from the path in memory; the cost is the same.
 //!
 //! A node number is the same in all files: the nodes of one file are one range of numbers (by file, then by rank).
 //! A new metric writes only its own folder.
@@ -39,10 +43,47 @@ fn sections(magic: &[u8; 8], first: u32, k: u32, parts: &[&[u8]]) -> Vec<u8> {
     out
 }
 
+/// The data of one file: for each node (by node number) its rank, edge id, items, higher neighbours (`off`, `other`,
+/// sorted) and lower neighbours (`doff`, `down`, sorted); for each metric the costs up and down and the mask bits of
+/// each edge of `other`.
+pub(crate) struct FileData {
+    pub rank: Vec<u32>,
+    pub edge: Vec<i64>,
+    pub item: Vec<f32>,
+    pub off: Vec<u32>,
+    pub other: Vec<u32>,
+    pub doff: Vec<u32>,
+    pub down: Vec<u32>,
+    pub metrics: Vec<(Vec<f64>, Vec<f64>, Vec<u64>, Vec<u64>)>,
+}
+
+/// Write `structure/<file>` and `<metric>/<file>` of one file; returns the bytes.
+pub(crate) fn write_file(dir: &Path, names: &[&str], key: u64, first: u32, d: &FileData) -> io::Result<u64> {
+    let k = d.rank.len() as u32;
+    let name = disk::file_name(key);
+    let b = sections(
+        STRUCTURE,
+        first,
+        k,
+        &[disk::bytes_of(&d.rank), disk::bytes_of(&d.edge), disk::bytes_of(&d.off), disk::bytes_of(&d.other), disk::bytes_of(&d.item), disk::bytes_of(&d.doff), disk::bytes_of(&d.down)],
+    );
+    std::fs::create_dir_all(dir.join("structure"))?;
+    std::fs::write(dir.join("structure").join(&name), &b)?;
+    let mut bytes = b.len() as u64;
+    for (mname, (up, down, ku, kd)) in names.iter().zip(&d.metrics) {
+        let b = sections(METRIC, first, k, &[disk::bytes_of(up), disk::bytes_of(down), disk::bytes_of(ku), disk::bytes_of(kd)]);
+        std::fs::create_dir_all(dir.join(mname))?;
+        std::fs::write(dir.join(mname).join(&name), &b)?;
+        bytes += b.len() as u64;
+    }
+    Ok(bytes)
+}
+
 /// Write the structure and the metrics. `ids`: the duckOSM edge id of each input node. The file of a node: the top
 /// (key 0) if its level is `top` or lower, else its zoom-8 XYZ tile (`home`) or the cell of zoom `top + 1`.
 #[allow(clippy::too_many_arguments)]
-pub fn write(cch: &Cch, metrics: &[(&str, &Metric)], ids: &[i64], level: &[u8], cell: &[u64], home: Option<&[u64]>, top: u8, dir: &Path) -> io::Result<u64> {
+/// `items`: the time and the length of each input node (its road edge).
+pub fn write(cch: &Cch, metrics: &[(&str, &Metric)], ids: &[i64], items: &[[f32; 2]], level: &[u8], cell: &[u64], home: Option<&[u64]>, top: u8, dir: &Path) -> io::Result<u64> {
     let n = ids.len();
     let key_of = |v: usize| -> u64 {
         if level[v] <= top {
@@ -70,34 +111,39 @@ pub fn write(cch: &Cch, metrics: &[(&str, &Metric)], ids: &[i64], level: &[u8], 
     if files.first().is_none_or(|f| f.2 != 0) {
         files.insert(0, (0, 0, 0));
     }
-    std::fs::create_dir_all(dir.join("structure"))?;
-    for (name, _) in metrics {
-        std::fs::create_dir_all(dir.join(name))?;
-    }
     let mut bytes = 0u64;
-    let to_num = |x: u32| if x == u32::MAX { u32::MAX } else { num[cch.order[x as usize] as usize] };
+    let to_num = |x: u32| num[cch.order[x as usize] as usize];
+    // the lower neighbours of each node (node numbers)
+    let mut lower: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for r in 0..n as u32 {
+        let lo = to_num(r);
+        for e in cch.row(r) {
+            lower[to_num(cch.up[e]) as usize].push(lo);
+        }
+    }
     for &(first, k, key) in &files {
         // for each node of the file: its higher neighbours (node numbers, sorted) and the edge of the structure of each
-        let (mut rank, mut edge, mut off, mut other, mut src) = (Vec::new(), Vec::new(), vec![0u32], Vec::new(), Vec::new());
+        let (mut rank, mut edge, mut off, mut other, mut src): (Vec<u32>, Vec<i64>, Vec<u32>, Vec<u32>, Vec<usize>) = (Vec::new(), Vec::new(), vec![0u32], Vec::new(), Vec::new());
+        let (mut item, mut doff, mut down) = (Vec::new(), vec![0u32], Vec::new());
         for &v in &by[first as usize..(first + k) as usize] {
             let r = cch.rank[v as usize];
             rank.push(r);
             edge.push(ids[v as usize]);
+            item.extend_from_slice(&items[v as usize]);
+            let lw = &mut lower[num[v as usize] as usize];
+            lw.sort_unstable();
+            down.extend_from_slice(lw);
+            doff.push(down.len() as u32);
             let mut row: Vec<(u32, usize)> = cch.row(r).map(|e| (to_num(cch.up[e]), e)).collect();
             row.sort_unstable();
             other.extend(row.iter().map(|x| x.0));
             src.extend(row.iter().map(|x| x.1));
             off.push(other.len() as u32);
         }
-        let name = disk::file_name(key);
-        let b = sections(STRUCTURE, first, k, &[disk::bytes_of(&rank), disk::bytes_of(&edge), disk::bytes_of(&off), disk::bytes_of(&other)]);
-        std::fs::write(dir.join("structure").join(&name), &b)?;
-        bytes += b.len() as u64;
-        for (mname, m) in metrics {
+        let mut ms = Vec::new();
+        for (_, m) in metrics {
             let up: Vec<f64> = src.iter().map(|&e| m.up[e]).collect();
             let down: Vec<f64> = src.iter().map(|&e| m.down[e]).collect();
-            let via_up: Vec<u32> = src.iter().map(|&e| to_num(m.via_up[e])).collect();
-            let via_down: Vec<u32> = src.iter().map(|&e| to_num(m.via_down[e])).collect();
             let bits = |keep: &[u64]| -> Vec<u64> {
                 let mut out = vec![0u64; src.len().div_ceil(64)];
                 for (j, &e) in src.iter().enumerate() {
@@ -107,11 +153,10 @@ pub fn write(cch: &Cch, metrics: &[(&str, &Metric)], ids: &[i64], level: &[u8], 
                 }
                 out
             };
-            let (ku, kd) = (bits(&m.keep[0]), bits(&m.keep[1]));
-            let b = sections(METRIC, first, k, &[disk::bytes_of(&up), disk::bytes_of(&down), disk::bytes_of(&via_up), disk::bytes_of(&via_down), disk::bytes_of(&ku), disk::bytes_of(&kd)]);
-            std::fs::write(dir.join(mname).join(&name), &b)?;
-            bytes += b.len() as u64;
+            ms.push((up, down, bits(&m.keep[0]), bits(&m.keep[1])));
         }
+        let names: Vec<&str> = metrics.iter().map(|m| m.0).collect();
+        bytes += write_file(dir, &names, key, first, &FileData { rank, edge, item, off, other, doff, down, metrics: ms })?;
     }
     let mut pairs: Vec<(i64, u32)> = (0..n).map(|v| (ids[v], num[v])).collect();
     pairs.sort_unstable();
@@ -173,11 +218,22 @@ impl Tile {
     fn cost(&self, dir: usize) -> &[f64] {
         self.m.get(dir)
     }
-    fn via(&self, dir: usize) -> &[u32] {
-        self.m.get(2 + dir)
-    }
     fn keep(&self, dir: usize, j: usize) -> bool {
-        self.m.get::<u64>(4 + dir)[j / 64] >> (j % 64) & 1 == 1
+        self.m.get::<u64>(2 + dir)[j / 64] >> (j % 64) & 1 == 1
+    }
+    /// time and length of node i
+    pub(crate) fn items(&self, i: usize) -> [f32; 2] {
+        let x: &[f32] = self.s.get(4);
+        [x[2 * i], x[2 * i + 1]]
+    }
+    fn lower(&self, i: usize) -> &[u32] {
+        let o: &[u32] = self.s.get(5);
+        &self.s.get::<u32>(6)[o[i] as usize..o[i + 1] as usize]
+    }
+    /// The cost of the edge from node i (local) to its higher neighbour w, in direction `dir` (0: i → w).
+    fn cost_to(&self, i: usize, w: u32, dir: usize) -> Option<f64> {
+        let r = self.row(i);
+        self.other()[r.clone()].binary_search(&w).ok().map(|k| self.cost(dir)[r.start + k])
     }
 }
 
@@ -194,6 +250,9 @@ pub struct Store {
 
 /// A route: its cost and its duckOSM edge ids (None: no path).
 pub type Route = Option<(f64, Vec<i64>)>;
+
+/// The files that one query uses (file number, file).
+type Open = Vec<(usize, Arc<Tile>)>;
 
 impl Store {
     pub fn open(dir: &Path, metric: &str) -> io::Result<Store> {
@@ -223,24 +282,27 @@ impl Store {
         ids.binary_search(&edge).ok().map(|i| nodes[i])
     }
 
-    /// The file of node `v` and the local number of `v` in it.
-    fn at(&self, v: u32, read: &mut Vec<usize>) -> io::Result<(Arc<Tile>, usize)> {
+    /// The file of node `v` and the local number of `v` in it: from the files of this query, or from the store.
+    fn at(&self, v: u32, read: &mut Open) -> io::Result<(Arc<Tile>, usize)> {
         let f = self.files.partition_point(|x| x.0 <= v) - 1;
-        let mut open = self.open.lock().expect("files");
-        let t = match &open[f] {
-            Some(t) => t.clone(),
-            None => {
-                let name = disk::file_name(self.files[f].2);
-                let s = Part::open(&self.dir.join("structure").join(&name), STRUCTURE)?;
-                let m = Part::open(&self.dir.join(&self.metric).join(&name), METRIC)?;
-                let t = Arc::new(Tile { first: self.files[f].0, s, m });
-                open[f] = Some(t.clone());
-                t
+        if let Some((_, t)) = read.iter().find(|e| e.0 == f) {
+            return Ok((t.clone(), (v - t.first) as usize));
+        }
+        let t = {
+            let mut open = self.open.lock().expect("files");
+            match &open[f] {
+                Some(t) => t.clone(),
+                None => {
+                    let name = disk::file_name(self.files[f].2);
+                    let s = Part::open(&self.dir.join("structure").join(&name), STRUCTURE)?;
+                    let m = Part::open(&self.dir.join(&self.metric).join(&name), METRIC)?;
+                    let t = Arc::new(Tile { first: self.files[f].0, s, m });
+                    open[f] = Some(t.clone());
+                    t
+                }
             }
         };
-        if !read.contains(&f) {
-            read.push(f);
-        }
+        read.push((f, t.clone()));
         let i = (v - t.first) as usize;
         Ok((t, i))
     }
@@ -316,20 +378,58 @@ impl Store {
         Ok((Some((best, ids)), read.len()))
     }
 
-    /// Add the nodes of the arc a → b after a: the edge is in the row of the lower rank; its middle node, if any.
-    fn unpack(&self, a: u32, b: u32, path: &mut Vec<u32>, read: &mut Vec<usize>) -> io::Result<()> {
+    /// The cost of the arc a → b (one of the two is the higher neighbour of the other).
+    fn arc(&self, a: u32, b: u32, read: &mut Open) -> io::Result<f64> {
         let (ta, ia) = self.at(a, read)?;
         let (tb, ib) = self.at(b, read)?;
-        let (lo_t, lo_i, hi, dir) = if ta.rank(ia) < tb.rank(ib) { (ta, ia, b, 0) } else { (tb, ib, a, 1) };
-        let r = lo_t.row(lo_i);
-        let k = lo_t.other()[r.clone()].binary_search(&hi).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("no edge {a} - {b} in the files")))?;
-        let x = lo_t.via(dir)[r.start + k];
-        if x == u32::MAX {
-            path.push(b);
-            Ok(())
-        } else {
-            self.unpack(a, x, path, read)?;
-            self.unpack(x, b, path, read)
+        let c = if ta.rank(ia) < tb.rank(ib) { ta.cost_to(ia, b, 0) } else { tb.cost_to(ib, a, 1) };
+        c.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("no edge {a} - {b} in the files")))
+    }
+
+    /// Add the nodes of the arc a → b after a. The middle node x is a lower neighbour of the lower end with an edge to
+    /// the higher end and cost(a → x) + cost(x → b) = cost(a → b); with no such x the arc is an input arc.
+    fn unpack(&self, a: u32, b: u32, path: &mut Vec<u32>, read: &mut Open) -> io::Result<()> {
+        let c = self.arc(a, b, read)?;
+        let (ta, ia) = self.at(a, read)?;
+        let (tb, ib) = self.at(b, read)?;
+        // the common lower neighbours of a and b (both lists sorted)
+        let (la, lb) = (ta.lower(ia), tb.lower(ib));
+        let (mut i, mut j) = (0, 0);
+        while i < la.len() && j < lb.len() {
+            match la[i].cmp(&lb[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    let x = la[i];
+                    let (tx, ix) = self.at(x, read)?;
+                    // x is lower than a and b: both edges are in the row of x
+                    if let (Some(ax), Some(xb)) = (tx.cost_to(ix, a, 1), tx.cost_to(ix, b, 0)) {
+                        if ax + xb == c {
+                            self.unpack(a, x, path, read)?;
+                            return self.unpack(x, b, path, read);
+                        }
+                    }
+                    i += 1;
+                    j += 1;
+                }
+            }
         }
+        path.push(b);
+        Ok(())
+    }
+
+    /// The items (time, length) of a route: the sum over its road edges except the last (an arc costs its first road
+    /// edge, as in duckOSM).
+    pub fn items(&self, route: &[i64]) -> io::Result<[f64; 2]> {
+        let mut read = Vec::new();
+        let mut sum = [0.0f64; 2];
+        for &id in &route[..route.len().saturating_sub(1)] {
+            let v = self.node(id).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("edge {id}")))?;
+            let (t, i) = self.at(v, &mut read)?;
+            let x = t.items(i);
+            sum[0] += x[0] as f64;
+            sum[1] += x[1] as f64;
+        }
+        Ok(sum)
     }
 }

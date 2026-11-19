@@ -74,6 +74,7 @@ unsafe impl Pod for u32 {}
 unsafe impl Pod for u64 {}
 unsafe impl Pod for i64 {}
 unsafe impl Pod for f64 {}
+unsafe impl Pod for f32 {}
 unsafe impl Pod for SArc {}
 unsafe impl Pod for AArc {}
 

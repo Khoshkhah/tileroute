@@ -106,35 +106,98 @@ One folder holds the shared structure and one sub-folder for each metric:
 ```text
 folder/
   index.bin, edges.idx    the files and the node of each duckOSM edge id (as for the hierarchy)
-  structure/8_x_y.trt     for each node: its rank, its edge id, its higher neighbours (shared by all metrics)
-  time/8_x_y.trt          for each edge of structure/8_x_y.trt, in the same order: two costs, two middle nodes, two mask bits
+  means.txt               the mean time and the mean length of an arc (for the metrics mixNN)
+  structure/8_x_y.trt     for each node: rank, edge id, items (time, length), higher and lower neighbours (shared)
+  time/8_x_y.trt          for each higher neighbour in structure/8_x_y.trt, in the same order: two costs, two mask bits
   length/8_x_y.trt        the same for the metric "length"
+  mix30/8_x_y.trt         the same for 30% time and 70% length (each divided by its mean)
 ```
 
 The files are the zoom-8 XYZ tiles (`--xyz-files`) or the partition cells, and the top file, as for the hierarchy. A
-new set of costs writes only its own folder; the structure does not change.
+new set of costs writes only its own folder; the structure does not change. The metric folders have **no middle
+nodes**: the unpack finds the middle node x of an edge a – b among the common lower neighbours of a and b, with
+cost(a → x) + cost(x → b) = cost(a → b).
 
 ```bash
-tileroute build area.duckdb -o folder --partition 16 --xyz-files --cch --metrics time,length
+# in memory
+tileroute build area.duckdb -o folder --partition 16 --xyz-files --cch --metrics time,length,mix50,mix30
+# one unit (cell of level 3) at a time: for large areas
+tileroute build area.duckdb -o folder --by-tile --partition 16 --xyz-files --cch --metrics time,length,mix50,mix30
 tileroute route folder --metric time --pairs-file pairs.csv
+tileroute weigh folder --pairs-file pairs.csv --candidates time,length,mix50 --exact mix30
 ```
 
-**Kentucky** (WSL PC, the same 10,000 pairs, one thread):
+**The build one unit at a time** (`--by-tile --cch`) works as [the build tile by tile](build-by-tile.md): the
+structure and the customization of all metrics for one unit (a cell of level 3) at a time; a fill edge or a triangle
+cost between two top nodes goes to the top; then the top (small) in memory; then for each unit the mask together with
+the top. The temporary files are removed as soon as they are used.
+
+**Kentucky** (WSL PC, the same 10,000 pairs, one thread, metrics time, length, mix50, mix30):
 
 | | Value |
 |---|---|
-| Build (in memory): read, structure 0.8 s, two customizations 2.4 s and 2.3 s, files 1.9 s | 17.7 s, peak 2.5 GB |
-| `structure/` | 104 MB (shared) |
-| `time/`, `length/` | 428 MB each |
-| One query from the files, metric time | 0.39 ms, 4.5 files read |
-| One query from the files, metric length | 0.54 ms, 4.5 files read |
-| Memory of the query process | 590 MB (pages of the mapped files) |
+| Build one unit at a time | 33 s, peak 2.2 GB (in memory, 5 metrics: 26 s, peak 4.1 GB) |
+| of this: nodes with the partition, arcs, means | 14.2 s |
+| of this: structure and customization of the units, the top | 4.7 s |
+| of this: mask and files | 14.3 s |
+| `structure/` | 200 MB (shared) |
+| Each metric folder | 288 MB |
+| One query from the files, metric time | 0.60 ms, 4.8 files read |
+| One query from the files, metric length | 0.87 ms |
+| Memory of the query process | 530 MB (pages of the mapped files) |
 | Routes from the files = routes in memory (time) | 2,000 of 2,000 |
+| Costs from the files = duckOSM's router (`tileroute reference`) | 300 of 300 |
 
 The queries of the metric length are slower: with length as the cost, the search reaches more nodes before it can
-stop. Each metric folder is 4 times the size of the structure: two costs (f64) and two middle nodes for each edge. A
-smaller form is a next step: f32 costs where the sums stay exact, or no middle nodes (the unpack then finds the middle
-node from the triangles).
+stop. Without the middle nodes, a metric folder is 288 MB in place of 428 MB, and a query takes 0.60 ms in place of
+0.39 ms (the unpack searches the lower neighbours).
+
+**The weighted query from the files** (`tileroute weigh`): the 3 candidates (time, length, mix50) are searched in
+parallel, and the route with the smallest cost for the weights wins: 1.43 ms for each query (one search alone:
+0.60 ms). Against the exact metric mix30: 27.1% of the routes exact, mean error 0.29%, largest error 4.0%; against
+mix70: 44.5% exact, mean error 0.14%, largest error 5.7%.
+
+## Results: France
+
+Mac mini (16 GB), 2026-11-19, `bench/france-weights.sh` with `GUARD_GB=25`: the same `.osm.pbf` and the same 2,000
+pairs as the other France measurements ([Comparison with other routers](engines.md#measured-on-france)). One thread.
+
+| | Value |
+|---|---|
+| duckOSM, then `slim` | 337 s (peak 9.7 GB), 4 s |
+| `build --by-tile --partition 16 --xyz-files --cch --metrics time,length,mix50,mix30` | **676 s, peak 9.2 GB** |
+| of this: nodes with the partition | 475 s |
+| of this: structure and customization of 4 metrics in the units, the top | 53 s, 6 s |
+| of this: mask and files | 110 s |
+| Edges of the structure | 209 million (top: 4,184 nodes) |
+| Files | 16.3 GB: `structure/` 2.2 GB (shared), 3.2 GB for each metric, 72 zoom-8 files and the top |
+
+| Metric | One query, warm (second pass) | cold (first pass) | Memory of the query process |
+|---|---|---|---|
+| time | 2.57 ms | 6.0 ms | 3.8 GB |
+| length | 3.67 ms | 6.1 ms | 5.0 GB |
+| mix50 | 3.04 ms | 5.6 ms | 4.5 GB |
+| mix30 | 3.24 ms | 7.2 ms | 4.7 GB |
+| For comparison: the hierarchy with the witness search, partition cells | 0.54 ms | 1.35 ms | 2.1 GB |
+
+**The weighted query** (3 candidates, time, length and mix50, searched in parallel): 7.7 ms for each query (one
+search alone: 2.6 ms). Against the exact metric mix30: 5.5% of the routes exact, **mean error 0.54%, largest error
+4.1%**. With 2 candidates (time and length): mean error 1.9%, largest error 6.9%.
+
+**Correctness:** 100 random pairs with duckOSM's router (`tileroute reference`, 13.5 s to load, 10.9 GB): 100 of 100
+costs equal to the files (metric time). All 4 metrics find a route for the same 1,939 of the 2,000 pairs.
+
+**What this shows:**
+
+- **Many metrics on France work on the Mac mini:** one build of 11 minutes and 9.2 GB makes the shared structure and
+  4 metrics; each more metric is 3.2 GB of files and less than 1 minute of customization in the units.
+- **The queries are about 5 times slower than the hierarchy with the witness search** (2.57 against 0.54 ms): the
+  structure has no witness search, so it has more edges; the search reads more files (12.7 against 7.0); and the
+  unpack searches the lower neighbours. Each metric pays this, so the weighted query takes 7.7 ms.
+- **The weighted estimate** stays near on France too (mean error 0.54% with 3 candidates); single pairs can be off
+  by up to 4%.
+- **Next for speed:** f32 costs next to the node numbers, the middle nodes back as an option, and fewer files for
+  each query.
 
 ## Weights for each query: the best of a few routes
 
@@ -188,7 +251,7 @@ fewer edges (2.6 times), and the full customization is faster than the steps.
 |---|---|
 | The customization in parallel, by depth of the elimination tree | Kentucky: the customization below 1 s |
 | A faster query on the shared structure: the costs of one direction next to the node numbers, f32 costs | Kentucky: near 0.26 ms with the mask |
-| A smaller metric folder (f32 costs, no middle nodes) | Kentucky: a metric folder below 200 MB |
-| The build of the structure and the customization one cell at a time, from disk | France on the Mac mini |
+| A smaller metric folder (f32 costs) | Kentucky: a metric folder below 200 MB |
+| France on the Mac mini (`bench/france-weights.sh`) | build time, peak memory, disk, query time of each metric, the error of the weighted query, 100 pairs against duckOSM's router |
 | Travel-time tables: one cost file for each hour on one structure | [Predicted traffic](predicted-traffic.md) with one structure |
 | France on the Mac mini | customization time, edges, query time next to the hierarchy |
