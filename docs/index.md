@@ -17,6 +17,7 @@ only the tiles that it needs, so that a country does not need all of its graph i
 | How a road edge gets a tile and a level | [Tiles and levels](explanation/levels.md) |
 | What a shortcut is, and how tileroute makes it | [Shortcuts](explanation/shortcuts.md) |
 | How a query uses the shortcuts | [The shortest path](explanation/query.md) |
+| Why and how the hierarchy is stored in tile files | [Tile files](explanation/tile-files.md) |
 | What the top-down phase gives | [The top-down phase](explanation/top-down.md) |
 | How to update the shortcuts after new costs | [Updates](explanation/updates.md) |
 | How a query uses its own weights for many items | [Weights](explanation/weights.md) |
