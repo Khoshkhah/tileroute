@@ -287,13 +287,18 @@ fn build(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let t = Instant::now();
-    let net = load::read(db.as_ref(), mode, finest)?;
+    // --partition LEAF: the order from the partition; --xyz-files: then the files are zoom-8 XYZ tiles (else cells of
+    // zoom --top + 1)
+    let leaf: Option<usize> = arg(args, "--partition").map(|s| s.parse()).transpose().map_err(|e| format!("--partition: {e}"))?;
+    let top: u8 = arg(args, "--top").map_or(Ok(if leaf.is_some() { 2 } else { disk::TOP }), |s| s.parse()).map_err(|e| format!("--top: {e}"))?;
+    let xyz = args.iter().any(|a| a == "--xyz-files");
+    let net = load::read_with(db.as_ref(), mode, finest, leaf)?;
     println!("read: {} nodes, {} arcs, {:.2} s", net.graph.n_nodes(), net.turns.len(), t.elapsed().as_secs_f64());
     let t = Instant::now();
     let h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone(), 0, true, false);
     println!("shortcuts: {} arcs in all, {:.2} s", h.n_arcs(), t.elapsed().as_secs_f64());
     let t = Instant::now();
-    let w = h.write_files(&net.graph.ids, dir.as_ref()).map_err(|e| e.to_string())?;
+    let w = h.write_files_by(&net.graph.ids, dir.as_ref(), top, xyz.then_some(&net.home[..])).map_err(|e| e.to_string())?;
     let tiles: Vec<&(String, u32, u64)> = w.iter().filter(|x| x.0.ends_with(".trt") && x.0 != "top.trt").collect();
     let size = |name: &str| w.iter().find(|x| x.0 == name).map_or(0, |x| x.2);
     let mb = |b: u64| b as f64 / 1e6;
@@ -301,7 +306,7 @@ fn build(args: &[String]) -> Result<(), String> {
     println!("  top.trt: {} nodes, {:.1} MB", w.iter().find(|x| x.0 == "top.trt").map_or(0, |x| x.1), mb(size("top.trt")));
     if let (Some(big), k) = (tiles.iter().max_by_key(|x| x.2), tiles.len()) {
         let sum: u64 = tiles.iter().map(|x| x.2).sum();
-        println!("  {k} zoom-8 tile files: {:.1} MB in all, mean {:.1} MB, largest {} {:.1} MB ({} nodes)", mb(sum), mb(sum) / k as f64, big.0, mb(big.2), big.1);
+        println!("  {k} tile files: {:.1} MB in all, mean {:.1} MB, largest {} {:.1} MB ({} nodes)", mb(sum), mb(sum) / k as f64, big.0, mb(big.2), big.1);
     }
     println!("  edges.idx: {:.1} MB, index.bin: {} bytes", mb(size("edges.idx")), size("index.bin"));
     Ok(())

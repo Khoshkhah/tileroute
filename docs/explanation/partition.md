@@ -74,9 +74,24 @@ again only when the road network changes.
 
 ## Files
 
-`build --by-tile --partition 16` writes one file for each cell of level 3 (64 files at most) and one top file (levels
-0 to 2). `--top Z` changes this: the top is level Z and coarser, and there is one file for each cell of level Z + 1.
-The format of the files does not change ([Tile files](../reference/tile-files.md)), so the query does not change.
+The order of the nodes and the files are two separate choices. The query needs only "node → file" (one range of node
+numbers for each file), so the files do not have to be the cells of the order.
+
+| Files | Option | Kentucky (the same 10,000 pairs, one thread) |
+|---|---|---|
+| By partition cell: one file for each cell of level 3 (64 files) and the top | `build --partition 16` | 0.172 ms for each query, 7.8 files and 192 KB read |
+| **By XYZ tile:** one file for each zoom-8 tile (`8_x_y.trt`, 18 files), the same tiles as duckOSM and PMTiles, and the top | `build --partition 16 --xyz-files` | **0.172 ms** for each query, **4.6 files** and 192 KB read |
+
+The file of a road edge is the zoom-8 XYZ tile of its first junction. The top file holds the nodes of level 2 and
+coarser (`--top Z` changes this). So the files keep the project's tiling, and the speed comes from the partition. The
+routes from the XYZ files are equal to the routes in memory (2,000 of 2,000).
+
+A tile file is valid only together with the other files of the same build: a shortcut depends on the partition cell
+where it was made, and a cell can cross a tile border.
+
+Today `--xyz-files` works with the build in memory. `build --by-tile --partition 16` writes files by partition cell (64
+files of level 3; the format is the same, [Tile files](../reference/tile-files.md)), because it builds one cell at a
+time.
 
 ## Results: Kentucky
 

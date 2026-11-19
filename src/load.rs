@@ -20,6 +20,8 @@ pub struct Network {
     pub turns: Vec<(u32, u32, f64)>,
     pub level: Vec<u8>,
     pub cell: Vec<u64>,
+    /// the zoom-8 XYZ tile of the first junction of each road edge (only with the partition; else 0)
+    pub home: Vec<u64>,
 }
 
 /// The own `uses` of a mode (duckOSM `ROUTED_USES`).
@@ -105,8 +107,9 @@ pub fn read(db: &Path, mode: &str, finest: u8) -> Result<Network> {
 
 /// Call `f(edge_id, level, cell)` for each road edge of `<mode>.edges`, with the cells from the inertial flow
 /// partition of the junctions (`crate::part`) in place of the tiles: cut until a cell has at most `leaf` junctions or
-/// the zoom is `finest`. Returns the number of road edges in the cuts of each zoom.
-pub fn partition_levels(con: &Connection, mode: &str, finest: u8, leaf: usize, mut f: impl FnMut(i64, u8, u64)) -> Result<Vec<usize>> {
+/// the zoom is `finest`. The last value of `f` is the zoom-8 XYZ tile of the first junction of the road edge. Returns the
+/// number of road edges in the cuts of each zoom.
+pub fn partition_levels(con: &Connection, mode: &str, finest: u8, leaf: usize, mut f: impl FnMut(i64, u8, u64, u64)) -> Result<Vec<usize>> {
     con.execute_batch("LOAD spatial;").map_err(err)?;
     let mut index = std::collections::HashMap::new();
     let mut pos: Vec<(f64, f64)> = Vec::new();
@@ -120,6 +123,7 @@ pub fn partition_levels(con: &Connection, mode: &str, finest: u8, leaf: usize, m
             pos.push((x.unwrap_or(0.0), y.unwrap_or(0.0)));
         }
     }
+    let xyz: Vec<u64> = pos.iter().map(|&(lon, lat)| tile::key(lat, lon, 8)).collect();
     // a plane: longitude times the cosine of the mean latitude, and latitude
     let lat0 = (pos.iter().map(|p| p.1).sum::<f64>() / pos.len().max(1) as f64).to_radians().cos();
     pos.iter_mut().for_each(|p| p.0 *= lat0);
@@ -143,7 +147,7 @@ pub fn partition_levels(con: &Connection, mode: &str, finest: u8, leaf: usize, m
     for (id, &(a, b)) in ids.iter().zip(&ends) {
         let (ka, kb) = (key[a as usize], key[b as usize]);
         let z = tile::lca_zoom(ka, kb);
-        f(*id, z, tile::parent(ka, z));
+        f(*id, z, tile::parent(ka, z), xyz[a as usize]);
     }
     Ok(cuts)
 }
@@ -171,19 +175,21 @@ pub fn read_with(db: &Path, mode: &str, finest: u8, leaf: Option<usize>) -> Resu
     // a node with no tile (not in edges): level 0, the whole world
     let mut level = vec![0u8; n];
     let mut cell = vec![0u64; n];
-    let set = |id: i64, z: u8, c: u64| {
+    let mut home = vec![0u64; n];
+    let mut set = |id: i64, z: u8, c: u64, h: u64| {
         if let Some(i) = graph.index_of(id) {
             level[i] = z;
             cell[i] = c;
+            home[i] = h;
         }
     };
     match leaf {
         Some(leaf) => {
             let t = std::time::Instant::now();
-            let cuts = partition_levels(&con, mode, finest, leaf, set)?;
+            let cuts = partition_levels(&con, mode, finest, leaf, &mut set)?;
             eprintln!("partition: {:.2} s, road edges in the cuts by zoom: {cuts:?}", t.elapsed().as_secs_f64());
         }
-        None => edge_levels(&con, mode, finest, set)?,
+        None => edge_levels(&con, mode, finest, |id, z, c| set(id, z, c, 0))?,
     }
-    Ok(Network { graph, turns, level, cell })
+    Ok(Network { graph, turns, level, cell, home })
 }

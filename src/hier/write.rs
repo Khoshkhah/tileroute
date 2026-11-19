@@ -13,13 +13,25 @@ impl Hierarchy {
     /// Write the hierarchy to the folder `dir`: one file for each zoom-8 tile, the top file and the edge index.
     /// `ids`: the duckOSM edge id of each node (the node numbers of `load::Network`).
     pub fn write_files(&self, ids: &[i64], dir: &Path) -> io::Result<Written> {
+        self.write_files_by(ids, dir, disk::TOP, None)
+    }
+
+    /// [`write_files`](Self::write_files), with the nodes of level `top` and coarser in the top file. `home`: the
+    /// zoom-8 XYZ tile of each node (input numbers); with it, the file of a node below the top is its XYZ tile, not the
+    /// cell of zoom `top + 1` (for the partition version: files by the project's tiles, the order by the partition).
+    pub fn write_files_by(&self, ids: &[i64], dir: &Path, top: u8, home: Option<&[u64]>) -> io::Result<Written> {
         std::fs::create_dir_all(dir)?;
         let n = self.level.len();
-        // the file of each node: key 0 (top) or its zoom-8 tile; in a file, the nodes by level, then by cell
+        // the file of each node: key 0 (top), or its tile; in a file, the nodes by level, then by cell
         let mut groups: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
         for v in 0..n as u32 {
             let (l, c) = (self.level[v as usize], self.cell[v as usize]);
-            groups.entry(if l <= disk::TOP { 0 } else { crate::tile::parent(c, disk::TOP + 1) }).or_default().push(v);
+            let key = match home.map(|h| h[self.to_old[v as usize] as usize]) {
+                _ if l <= top => 0,
+                Some(h) => h,
+                None => crate::tile::parent(c, top + 1),
+            };
+            groups.entry(key).or_default().push(v);
         }
         let mut num = vec![0u32; n];
         let mut files = Vec::new();

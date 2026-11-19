@@ -52,6 +52,7 @@ tileroute build kentucky.duckdb -o kentucky.tiles
 | `--mode` | `driving` | The duckOSM mode |
 | `--finest` | `20` | The finest level |
 | `--by-tile` | off | Prepare one zoom-8 tile at a time, with much less memory ([The preparation tile by tile](../explanation/build-by-tile.md)); the files are the same format |
+| `--xyz-files` | off | With `--partition`, in memory: one file for each zoom-8 XYZ tile, not for each partition cell ([Files](../explanation/partition.md#files)) |
 | `--partition LEAF` | off | With `--by-tile`: the cells from the partition, as for `check` |
 | `--top Z` | 7 (2 with `--partition`) | With `--by-tile`: the nodes of level Z and coarser are the top; one file for each cell of zoom Z + 1 |
 

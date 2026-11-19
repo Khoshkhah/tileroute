@@ -150,7 +150,7 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir
     let mut nodes: Vec<(i64, u8, u64)> = Vec::new();
     match leaf {
         Some(leaf) => {
-            load::partition_levels(&con, mode, finest, leaf, |id, z, c| nodes.push((id, z, c)))?;
+            load::partition_levels(&con, mode, finest, leaf, |id, z, c, _| nodes.push((id, z, c)))?;
         }
         None => load::edge_levels(&con, mode, finest, |id, z, c| nodes.push((id, z, c)))?,
     }
