@@ -30,6 +30,7 @@ fn run() -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("build") => return build(&args),
         Some("route") => return route_files(&args),
+        Some("slim") => return slim(&args),
         _ => {}
     }
     let opt = |name: &str, default: &str| -> String {
@@ -297,6 +298,28 @@ fn build(args: &[String]) -> Result<(), String> {
         println!("  {k} zoom-8 tile files: {:.1} MB in all, mean {:.1} MB, largest {} {:.1} MB ({} nodes)", mb(sum), mb(sum) / k as f64, big.0, mb(big.2), big.1);
     }
     println!("  edges.idx: {:.1} MB, index.bin: {} bytes", mb(size("edges.idx")), size("index.bin"));
+    Ok(())
+}
+
+/// `tileroute slim <db> <out.duckdb> [--mode driving]`: copy only what tileroute reads (the arcs of the mode, the road
+/// edges and the points of their ends) into a new, small database.
+fn slim(args: &[String]) -> Result<(), String> {
+    let (Some(db), Some(out)) = (args.get(1), args.get(2)) else { return Err("usage: tileroute slim <db> <out.duckdb> [--mode driving]".into()) };
+    let mode = arg(args, "--mode").map_or("driving", |s| s.as_str());
+    // a writable connection: the source read-only, the new file writable
+    let con = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+    con.execute_batch(&format!("LOAD spatial; ATTACH '{db}' AS src (READ_ONLY); USE src;")).map_err(|e| e.to_string())?;
+    let relation = load::relation(&con, mode)?;
+    let sql = format!(
+        "ATTACH '{out}' AS slim;
+         CREATE SCHEMA slim.{mode};
+         CREATE TABLE slim.{mode}.edge_graph AS SELECT from_edge, to_edge, cost FROM {relation};
+         CREATE TABLE slim.{mode}.edges AS SELECT edge_id, source, target FROM {mode}.edges;
+         CREATE TABLE slim.{mode}.nodes AS SELECT node_id, geom FROM {mode}.nodes;
+         DETACH slim;"
+    );
+    con.execute_batch(&sql).map_err(|e| e.to_string())?;
+    println!("wrote {out}: {mode}.edge_graph, {mode}.edges, {mode}.nodes");
     Ok(())
 }
 
