@@ -100,6 +100,11 @@ between its nodes:
 The cause of the dense top is the order: each set joins all its in-nodes to all its out-nodes, and the large tiles
 have many roads across their borders. A classic contraction hierarchy avoids this with an order by importance.
 
+!!! tip "The fix: cells from the graph"
+    With cells from a partition of the road graph, a set holds only the roads across one small cut. On Kentucky the
+    coarsest set has 120 road edges (973 with tiles), and a query opens 8,789 arcs (180,733 with tiles). See
+    [Cells from the graph](partition.md).
+
 **A classic order for the top (`--top-ch Z`) does not help either.** The tile steps run down to zoom Z + 1; then the
 nodes of zoom Z and coarser are removed one at a time in the order of importance (as OSRM and GraphHopper do), in
 parallel rounds of nodes that do not touch each other:

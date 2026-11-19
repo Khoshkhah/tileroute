@@ -120,8 +120,9 @@ only the three tables that tileroute reads (2.0 GB, 5 s).
 Not checked yet for France: the routes against duckOSM's router (the check needs all of France in memory). The method
 is the same as on Kentucky and Monaco, where all checked routes are equal.
 
-**What to improve next:** the top. Its 28,192 nodes take 256 s to prepare, and its file (794 MB) is most of the 31 MB
-that a query reads.
+**The top was the slow part.** Its 28,192 nodes took 256 s to prepare, and its file (794 MB) was most of the 31 MB
+that a query read. With `--partition 16` the top has 4,184 nodes, its steps take 0.8 s, and a query reads 1.5 MB
+and takes 0.54 ms ([Cells from the graph](partition.md#results-france)).
 
 **What decides the peak memory now:** the largest zoom-8 tile (Kentucky: Louisville, 668,580 nodes) and the node tables
 (about 25 bytes for each road edge). For France, the largest tile (Paris) has more nodes than Louisville; the peak is

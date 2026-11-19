@@ -61,6 +61,11 @@ Kentucky (2.6 ms against 2.4 ms in memory).
 |---|---|---|
 | Files of zoom 8 | zoom 6 or zoom 10 | Zoom 8 is the tile size of duckOSM builds and pbfcut. Kentucky has 18 files; a query reads 3.7 on average. |
 | One top file for levels 0 to 7 | one file for each coarse tile | The top is small (Kentucky: 3,340 nodes, 47 MB) and almost each query reads it. |
+
+!!! note "The partition version"
+    With `--partition 16`, the top file holds levels 0 to 2 (`--top Z` changes this). The other files are the cells of
+    level 3 (`build --by-tile`), or the zoom-8 XYZ tiles (`build --xyz-files`, in memory): the order of the nodes and
+    the files are two separate choices. See [Cells from the graph](partition.md#files).
 | Global node numbers | a local number and a tile key for each arc | 4 bytes for each arc, and no step that changes numbers during the search |
 | Memory map | read the file into memory | The operating system reads only the pages that the query touches, and keeps them in its cache for the next query |
 | A cache of 64 open files | keep all files open | The memory stays limited when an area has thousands of files |

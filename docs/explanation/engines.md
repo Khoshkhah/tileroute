@@ -99,7 +99,11 @@ queries are about 10 times faster: 0.54 ms warm, faster than GraphHopper CH (0.8
 except GraphHopper (8.4 GB), and about 15 minutes with duckOSM's build. Note: GraphHopper here has no turn costs,
 tileroute and OSRM have them.
 
-## Why tileroute is slower and larger today
+## Why the tile version is slower and larger
+
+!!! note
+    This section measures the tile version. The [partition version](partition.md) removes its main cause, the dense
+    top: France 0.54 ms for each query, faster than OSRM CH on the same Mac ([Measured on France](#measured-on-france)).
 
 Where the time of one tileroute query goes (Kentucky, the same pairs, one thread, `tileroute check --profile`):
 
@@ -181,7 +185,8 @@ These fixes are milestone M2c of the [Plan](../plan.md).
 
 | Weak point | Reason | Possible fix |
 |---|---|---|
-| Queries slower than OSRM CH and GraphHopper CH (Mac mini: 0.66 ms in memory, 0.81 ms from the files, against 0.58 and 0.38 ms) | the dense top of the hierarchy (many arcs for each top node) | done: saved paths, memory layout, witness search, arc reduction; tileroute is now near OSRM CH and faster than OSRM MLD |
-| More shortcuts than a graph partitioner would make | tile borders do not follow the roads | accepted for one tiling protocol |
-| A query reads 3.0 MB of tile files on average (Kentucky, with arc reduction; 8.8 MB before) | the arcs of the low levels are large, and each arc is stored three times | a smaller arc, one arc list ([Tile files](../reference/tile-files.md#next-steps)) |
+| Tile version: queries slower than OSRM CH on large areas (France: 5.32 ms against 1.15 ms) | the dense top of the hierarchy: tile borders do not follow the roads | **done**: the [partition version](partition.md), France 0.54 ms (warm) and 1.35 ms (cold) |
+| Partition version: the partition is the slow part of the build (France: 478 s of 545 s) | the first cuts are large maximum-flow problems, with little parallel work | the first cuts in parallel, or a coarse graph first |
+| The structure depends on the costs (the witness search) | new costs run the steps again; time-dependent costs and per-query weights need a structure with no costs | a rank for each node of a set, no witness search, and a customization step, as CCH ([Comparison with CCH and MLD](partition.md#comparison-with-cch-and-mld)) |
+| A query reads 3.0 MB of tile files on average (Kentucky tile version; 194 KB with the partition version) | the arcs of the low levels are large, and each arc is stored three times | a smaller arc, one arc list ([Tile files](../reference/tile-files.md#next-steps)) |
 | Not a full product | no snapping of points to roads, no turn instructions, no server, no browser yet | later milestones |

@@ -3,16 +3,18 @@
 This page is the plan from today to a router with dynamic costs, per-query weights, many modes and timetables, by
 tile, natively and in the browser.
 
-## Where we are (2026-11-18)
+## Where we are (2026-11-19)
 
 | Part | Status |
 |---|---|
-| Shortcuts by tile (bottom-up, set version) | done, 0 wrong routes on all checks |
-| Query in memory | done: Kentucky 24 ms against 811 ms for duckOSM's router |
+| Shortcuts by cell (bottom-up, set version) | done, 0 wrong routes on all checks |
+| Query in memory | done: Kentucky 0.23 ms (partition version) against 811 ms for duckOSM's router |
 | Top-down phase, triangle version | measured, not kept, code removed ([The top-down phase](explanation/top-down.md), [Updates](explanation/updates.md)) |
 | Every shortcut pair kept (for the rebuild and the weights) | done (M2) |
-| Tile files on disk, browser | not started |
-| Weights, modes, timetable | design on these pages |
+| Tile files on disk | done (M3, M3b): France 0.54 ms for each query from the files with the partition version |
+| Cells from the graph (partition version) | done (D1), an option: `--partition 16` ([page](explanation/partition.md)) |
+| Browser | not started |
+| Weights, modes, timetable, the whole world | design on these pages |
 
 ## The decisions
 
@@ -60,7 +62,7 @@ So the shortcuts do not hold time functions; they only make the exact time-depen
 | **M2b Same-computer comparison** (done) | Install OSRM, GraphHopper and Valhalla; build Kentucky (and Metro Vancouver) from the same `.osm.pbf`; run the same 10,000 pairs on one thread, one router at a time ([Comparison with other routers](explanation/engines.md)) | one table: preparation, disk, memory, query time, and the travel-time difference to duckOSM's router for each router |
 | **M2c Faster and smaller queries** (in progress: saved paths, flat arrays, stall-on-demand and the witness search are done; Kentucky 10.5 → 1.09 ms with the memory layout and the arc reduction) | Witness search, the middle node of each shortcut for the unpack, flat arrays and stall-on-demand in the search, one compact arc list ([why](explanation/engines.md#why-tileroute-is-slower-and-larger-today)) | the same routes (0 wrong); Kentucky query time and query memory measured again on the Mac mini, next to OSRM and GraphHopper |
 | **M3 Tile files** | One file for each zoom-8 tile with the shortcuts of its tiles, an archive of all files, memory-mapped reads, the edge index | a query reads only its tiles; the routes are equal to the in-memory routes; reads and time measured for each query |
-| **M3b Preparation tile by tile** (done) | `tileroute build --by-tile`: one zoom-8 tile at a time, the top in memory ([page](explanation/build-by-tile.md)) | Kentucky: peak 4.5 → 1.8 GB, routes equal. France on the Mac mini: 547 s, peak 9.7 GB, files 8.7 GB, 5.3 ms per query from the files |
+| **M3b Preparation tile by tile** (done) | `tileroute build --by-tile`: one zoom-8 tile at a time, the top in memory ([page](explanation/build-by-tile.md)) | Kentucky: peak 4.5 → 1.8 GB, routes equal. France on the Mac mini: 547 s, peak 9.7 GB, files 8.7 GB, 5.3 ms per query from the files; with `--partition 16`: 545 s, peak 8.4 GB, files 4.7 GB, 0.54 ms |
 | **M4 Rebuild** | `tileroute rebuild` with new costs from duckOSM (or from SonoFlow flows), structure kept, new tile files | the routes equal a new preparation; rebuild time of Kentucky and France (Mac mini) measured |
 | **M5 Items and weights** | duckOSM gives the items (time, length, turn types, traffic lights) as columns of `edge_graph`; tileroute keeps the hull corners for each shortcut; the query takes the weights | for random weights, 0 wrong routes against duckOSM's router with the same cost; corners, size and time measured for 2 and 3 items |
 | **M6 Many modes** | Walking and cycling checks; one-to-many and many-to-many queries; combined graphs (free change, then rules), with the same model as duckOSM's `route_multimodal` | each mode and each combined graph: 0 wrong routes against duckOSM |

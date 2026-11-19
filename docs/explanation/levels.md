@@ -41,6 +41,10 @@ The finest level is 20 (about 38 m at the equator). A road edge with a higher `l
     two children of T. Two road edges with the same level and different cells have no common junction, because their
     cells do not overlap. So the tiles of one zoom are independent, and tileroute does them in parallel.
 
+!!! tip "Cells from the graph"
+    The method needs only cells that are nested and do not overlap. The [partition version](partition.md) gives the
+    cells from a partition of the road graph, with keys of the same form, and is about 10 times faster on France.
+
 ## H3 resolution and XYZ zoom
 
 h3-routing-platform uses H3 cells. Here are the zooms with about the same cell size, at the latitude of France (46° N):
