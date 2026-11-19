@@ -1,6 +1,6 @@
 # tileroute: design and plan
 
-Status: draft for approval, 2026-11-18. No code yet.
+Status: first draft, 2026-11-18. The method changed after this draft: see docs/explanation/ (the site). This file is kept for its history.
 
 ## 1. The problem
 

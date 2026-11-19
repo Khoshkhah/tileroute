@@ -1,0 +1,68 @@
+site_name: tileroute
+site_url: https://khoshkhah.github.io/tileroute/
+repo_url: https://github.com/Khoshkhah/tileroute
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: IBM Plex Sans
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle: { icon: material/weather-night, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle: { icon: material/weather-sunny, name: Light mode }
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+extra_css:
+  - assets/extra.css
+# the first design draft is for developers: on GitHub, not on the site
+exclude_docs: |
+  design.md
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - toc:
+      permalink: true
+nav:
+  - Home: index.md
+  - Explanation:
+      - The graph: explanation/graph.md
+      - Tiles and levels: explanation/levels.md
+      - Shortcuts: explanation/shortcuts.md
+      - The shortest path: explanation/query.md
+      - The top-down phase: explanation/top-down.md
+      - Updates (new costs): explanation/updates.md
+      - Weights (many items): explanation/weights.md
+      - Modes: explanation/modes.md
+      - Timetable: explanation/timetable.md
+      - Predicted traffic: explanation/predicted-traffic.md
+      - Comparison with h3-routing-platform: explanation/comparison.md
+  - Plan: plan.md
+  - Reference:
+      - The command line: reference/cli.md
+      - Measurements: reference/measurements.md
