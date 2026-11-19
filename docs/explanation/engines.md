@@ -49,6 +49,49 @@ table shows the travel time of each router divided by the time of duckOSM's rout
 
 OSRM's car profile drives more slowly than duckOSM's speeds; Valhalla's speeds are near duckOSM's.
 
+## Measured on France
+
+Mac mini (Apple, 12 cores, 16 GB), 2026-11-19, one router at a time, nothing else running (`bench/francebench.sh`).
+France driving from the same `france-latest.osm.pbf` (5.1 GB). The same 2,000 random pairs for all routers
+(`tileroute route --random 2000`, then `tileroute points` gives the points for the other routers). One query at a time,
+one thread; "cold" is the first pass after the start, "warm" the second.
+
+| Router | Preparation | Peak memory (preparation) | Files | One query, warm / cold | Memory at query time |
+|---|---|---|---|---|---|
+| GraphHopper CH 11.1 (no turn costs) | import 211 s | 8.8 GB | 1.7 GB | **0.89** / 1.17 ms | 3.9 GB (Java) |
+| OSRM CH 26.11 | extract 677 s + contract 549 s | 11.9 GB | 8.4 GB | 1.15 / 1.48 ms | 5.6 GB |
+| OSRM MLD 26.11 | extract 672 s + partition 146 s + customize 20 s | 12.4 GB | 9.3 GB | 2.95 / 3.52 ms | 5.2 GB |
+| **tileroute** (from tile files) | duckOSM 372 s + slim 5 s + `build --by-tile` 547 s | 9.5 GB | 8.1 GB | 5.32 / 10.3 ms | 4.0 GB ¹ |
+| duckOSM's router today | load 11 to 16 s | — | — | 3.7 s (Paris to Marseille) | 6.4 GB |
+
+¹ The peak of the query process: almost all of it is pages of the mapped tile files; a query reads 7.2 tiles and 31 MB
+on average.
+
+**The routes of the 2,000 pairs:**
+
+| Router | Pairs with a route in both | Travel time / duckOSM's time: median | Within ±10% | Within ±25% |
+|---|---|---|---|---|
+| GraphHopper CH | 1,923 | 1.155 | 7.5% | 85.9% |
+| OSRM CH and MLD (equal) | 1,939 | 1.255 | 0.0% | 18.7% |
+
+The travel times are not equal, because each router has its own speed model: OSRM's car profile drives about 25%
+slower than duckOSM's speeds, GraphHopper about 15% slower (Kentucky showed the same: 1.227 and 1.135). So the routes
+cannot match edge by edge; tileroute's routes equal duckOSM's router where that check runs (Monaco, Kentucky).
+
+**Pairs with no route in tileroute (61), where OSRM has one:**
+
+| Cause | Pairs |
+|---|---|
+| One end in Corsica: OSRM's car profile drives on ferries; duckOSM's driving network has no ferries | 32 |
+| Both ends on the mainland: OSRM moves each point to the nearest road of its own network; tileroute starts from the given road edge, which is in a small part of duckOSM's network with no road to the target (for example a private or closed road) | 29 |
+
+GraphHopper found no route for 17 pairs (16 of them have a route in tileroute): it did not find a road near the point.
+
+**What this shows:** on France, tileroute needs a little less memory than OSRM to prepare (9.5 GB against 11.9 to
+12.4 GB) and less time in all (about 15 minutes with duckOSM's build, against 14 to 20 minutes for OSRM). Its queries
+are 4.6 times slower than OSRM CH and 1.8 times slower than OSRM MLD. The reason is the top of the hierarchy: 28,192
+nodes and a 794 MB top file, which most queries read.
+
 ## Why tileroute is slower and larger today
 
 Where the time of one tileroute query goes (Kentucky, the same pairs, one thread, `tileroute check --profile`):
