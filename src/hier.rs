@@ -18,15 +18,15 @@ use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
-/// The `zoom` of an arc that is a turn of the input graph, not a shortcut.
-const BASE: u8 = u8::MAX;
 
-/// An arc: its cost, and for a shortcut the zoom and the tile of the set that it jumps over.
+
+/// An arc: its cost, and for a shortcut where its inner nodes are in `Hierarchy::paths`.
 #[derive(Clone, Copy, Debug)]
 struct Arc {
     cost: f64,
-    zoom: u8,
-    tile: u64,
+    /// a shortcut: its inner nodes are `inner[start..start + len]`; an arc of the input graph: `len` = 0
+    start: u32,
+    len: u32,
 }
 
 /// The arcs of each node in flat arrays, sorted by the other node.
@@ -92,6 +92,8 @@ pub struct Hierarchy {
     pub pairs: Vec<(u32, u32, u8, u64)>,
     /// for each zoom: (shortcut pairs, the sum of their inner nodes, the largest number of inner nodes)
     pub inner: Vec<(u64, u64, u32)>,
+    /// the inner nodes of the shortcuts (see `Arc`)
+    paths: Vec<u32>,
 }
 
 /// What one search found: the labels (distance, parent) of each direction, the best meeting node, and the tiles (cells)
@@ -111,7 +113,7 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
     let mut arcs: Vec<HashMap<u32, Arc>> = vec![HashMap::new(); n];
     let mut inn: Vec<Vec<u32>> = vec![Vec::new(); n];
     for &(u, w, c) in turns {
-        arcs[u as usize].insert(w, Arc { cost: c, zoom: BASE, tile: 0 });
+        arcs[u as usize].insert(w, Arc { cost: c, start: 0, len: 0 });
         inn[w as usize].push(u);
     }
     let mut alive = vec![true; n];
@@ -120,6 +122,8 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
     let mut steps = vec![(0usize, 0.0f64, 0.0f64); top as usize + 1];
     let mut pairs = Vec::new();
     let mut inner = vec![(0u64, 0u64, 0u32); top as usize + 1];
+    // the inner nodes of all kept shortcuts, one after the other
+    let mut paths: Vec<u32> = Vec::new();
     for z in (1..=top).rev() {
         let mut sets: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
         for v in 0..n {
@@ -127,7 +131,7 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
                 sets.entry(cell[v]).or_default().push(v as u32);
             }
         }
-        let made: Vec<(u64, Vec<(u32, u32, f64, u32)>, f64)> = sets
+        let made: Vec<(u64, Vec<(u32, u32, f64, Vec<u32>)>, f64)> = sets
             .par_iter()
             .map(|(&t, xs)| {
                 let t0 = std::time::Instant::now();
@@ -140,18 +144,18 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
             st.0 += 1;
             st.1 += secs;
             st.2 = st.2.max(secs);
-            for (u, w, c, k) in rows {
+            for (u, w, c, p) in rows {
+                let k = p.len() as u32;
                 inner[z as usize].0 += 1;
                 inner[z as usize].1 += k as u64;
                 inner[z as usize].2 = inner[z as usize].2.max(k);
                 pairs.push((u, w, z, t));
                 shortcuts[z as usize] += 1;
-                let new = Arc { cost: c, zoom: z, tile: t };
-                match arcs[u as usize].get_mut(&w) {
-                    Some(a) if c < a.cost => *a = new,
-                    Some(_) => {}
-                    None => {
-                        arcs[u as usize].insert(w, new);
+                let keep = arcs[u as usize].get(&w).is_none_or(|a| c < a.cost);
+                if keep {
+                    let new = Arc { cost: c, start: paths.len() as u32, len: k };
+                    paths.extend(p);
+                    if arcs[u as usize].insert(w, new).is_none() {
                         inn[w as usize].push(u);
                     }
                 }
@@ -178,7 +182,7 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
             }
         }
     }
-    Hierarchy { all: Csr::new(n, all), up: Csr::new(n, up), down: Csr::new(n, down), level, cell, shortcuts, steps, pairs, inner }
+    Hierarchy { all: Csr::new(n, all), up: Csr::new(n, up), down: Csr::new(n, down), level, cell, shortcuts, steps, pairs, inner, paths }
 }
 
 /// The shortcuts over the set `xs` (level `z`, cell `t`): for each node `u` with a turn into the set, a Dijkstra in the
@@ -193,25 +197,25 @@ fn contract(
     z: u8,
     t: u64,
     xs: &[u32],
-) -> Vec<(u32, u32, f64, u32)> {
+) -> Vec<(u32, u32, f64, Vec<u32>)> {
     let in_set = |v: u32| level[v as usize] == z && cell[v as usize] == t;
     let sources: BTreeSet<u32> =
         xs.iter().flat_map(|&x| inn[x as usize].iter().copied()).filter(|&u| alive[u as usize] && !in_set(u)).collect();
     let mut out = Vec::new();
     for u in sources {
-        // dist: (cost, number of inner nodes on the path so far)
+        // dist: (cost, the node before on the path; u for the first inner node)
         let mut dist: HashMap<u32, (f64, u32)> = HashMap::new();
         let mut heap = BinaryHeap::new();
         for (&x, a) in &arcs[u as usize] {
             if in_set(x) && dist.get(&x).is_none_or(|&(d, _)| a.cost < d) {
-                dist.insert(x, (a.cost, 1));
+                dist.insert(x, (a.cost, u));
                 heap.push(Key(a.cost, x));
             }
         }
+        // to: (cost, the last inner node)
         let mut to: BTreeMap<u32, (f64, u32)> = BTreeMap::new();
         while let Some(Key(d, x)) = heap.pop() {
-            let (dx, kx) = dist[&x];
-            if d > dx {
+            if d > dist[&x].0 {
                 continue;
             }
             for (&y, a) in &arcs[x as usize] {
@@ -221,15 +225,22 @@ fn contract(
                 let nd = d + a.cost;
                 if in_set(y) {
                     if dist.get(&y).is_none_or(|&(e, _)| nd < e) {
-                        dist.insert(y, (nd, kx + 1));
+                        dist.insert(y, (nd, x));
                         heap.push(Key(nd, y));
                     }
                 } else if y != u && to.get(&y).is_none_or(|&(e, _)| nd < e) {
-                    to.insert(y, (nd, kx));
+                    to.insert(y, (nd, x));
                 }
             }
         }
-        out.extend(to.into_iter().map(|(w, (c, k))| (u, w, c, k)));
+        for (w, (c, last)) in to {
+            let mut p = vec![last];
+            while dist[p.last().expect("not empty")].1 != u {
+                p.push(dist[p.last().expect("not empty")].1);
+            }
+            p.reverse();
+            out.push((u, w, c, p));
+        }
     }
     out
 }
@@ -336,53 +347,17 @@ impl Hierarchy {
     /// Add the nodes of the arc `a -> b` after `a` (which is already in `path`).
     fn unpack(&self, a: u32, b: u32, path: &mut Vec<u32>) {
         let arc = self.all.find(a, b).expect("an arc of the path is in the graph");
-        if arc.zoom == BASE {
-            path.push(b);
-            return;
-        }
-        // the shortest path a -> b with its inner nodes in the set (zoom, tile): the same Dijkstra as in `contract`
-        let in_set = |v: u32| self.level[v as usize] == arc.zoom && self.cell[v as usize] == arc.tile;
-        let mut label: HashMap<u32, (f64, u32)> = HashMap::new();
-        let mut heap = BinaryHeap::new();
-        for (x, e) in self.all.of(a) {
-            if in_set(x) && label.get(&x).is_none_or(|&(d, _)| e.cost < d) {
-                label.insert(x, (e.cost, a));
-                heap.push(Key(e.cost, x));
-            }
-        }
-        let mut end: Option<(f64, u32)> = None;
-        while let Some(Key(d, x)) = heap.pop() {
-            if x == b {
-                break;
-            }
-            if d > label[&x].0 {
-                continue;
-            }
-            for (y, e) in self.all.of(x) {
-                let nd = d + e.cost;
-                if in_set(y) {
-                    if label.get(&y).is_none_or(|&(f, _)| nd < f) {
-                        label.insert(y, (nd, x));
-                        heap.push(Key(nd, y));
-                    }
-                } else if y == b && end.is_none_or(|(f, _)| nd < f) {
-                    end = Some((nd, x));
-                    heap.push(Key(nd, b));
-                }
-            }
-        }
-        let (cost, mut x) = end.expect("a shortcut has its path in its set");
-        debug_assert_eq!(cost, arc.cost);
-        let mut inner = vec![];
-        while x != a {
-            inner.push(x);
-            x = label[&x].1;
-        }
-        inner.reverse();
+        // each step a -> x1 -> ... -> b is an arc (an arc of the input graph or a finer shortcut); the arcs to the
+        // nodes of a set never change after its step, so the saved path stays valid
         let mut prev = a;
-        for x in inner.into_iter().chain(std::iter::once(b)) {
+        for &x in &self.paths[arc.start as usize..(arc.start + arc.len) as usize] {
             self.unpack(prev, x, path);
             prev = x;
+        }
+        if arc.len == 0 {
+            path.push(b);
+        } else {
+            self.unpack(prev, b, path);
         }
     }
 
@@ -390,7 +365,7 @@ impl Hierarchy {
     /// which only a rebuild needs).
     pub fn query_bytes(&self) -> usize {
         let csr = |c: &Csr| c.off.len() * 4 + c.other.len() * 4 + c.arc.len() * std::mem::size_of::<Arc>();
-        csr(&self.all) + csr(&self.up) + csr(&self.down) + self.level.len() + self.cell.len() * 8
+        csr(&self.all) + csr(&self.up) + csr(&self.down) + self.level.len() + self.cell.len() * 8 + self.paths.len() * 4
     }
 
     pub fn n_arcs(&self) -> usize {
