@@ -59,6 +59,7 @@ nav:
       - The top-down phase: explanation/top-down.md
       - Updates (new costs): explanation/updates.md
       - The preparation tile by tile: explanation/build-by-tile.md
+      - Cells from the graph (partition): explanation/partition.md
       - The whole world (distributed): explanation/distributed.md
       - Weights (many items): explanation/weights.md
       - Modes: explanation/modes.md

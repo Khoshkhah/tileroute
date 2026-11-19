@@ -1,7 +1,7 @@
 # The whole world, with many queries at the same time
 
 !!! note "Status"
-    Design only. No code for this page exists yet. The numbers for the world are **estimates** from the France
+    Step D1 (the partition) is done and measured: see [Cells from the graph](partition.md). Steps D2 to D5 are design only. The numbers for the world are **estimates** from the France
     measurements ([The preparation tile by tile](build-by-tile.md)). The steps at the end of this page measure them.
 
 This page describes how tileroute can serve routes for the whole world to many users at the same time. It has two
@@ -183,3 +183,8 @@ when the roads across its cut change.
 | D5 | A load test | queries per second for each server; time for 50%, 99% of the queries |
 
 D1 is the condition for all other steps: if the sets stay large, the distribution does not help.
+
+## D1 results
+
+Step D1 is done on Kentucky: 7.8 times faster queries, with 0 wrong routes. The method and the results are on
+[Cells from the graph](partition.md).
