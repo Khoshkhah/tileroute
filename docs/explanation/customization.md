@@ -199,6 +199,27 @@ costs equal to the files (metric time). All 4 metrics find a route for the same 
 - **Next for speed:** f32 costs next to the node numbers, the middle nodes back as an option, and fewer files for
   each query.
 
+## Faster queries: the middle nodes as an option
+
+Kentucky, from the files, the same 10,000 pairs, one thread. Half of the time of a query (0.29 of 0.56 ms) was the
+unpack: without middle nodes, it searches the common lower neighbours of each edge.
+
+| | No middle nodes | `--middle-nodes` |
+|---|---|---|
+| Each metric folder | 288 MB | 430 MB |
+| One query, metric time | 0.59 ms | **0.40 to 0.48 ms** |
+| One query, metric length | 0.86 ms | **0.55 ms** |
+| Weighted query, 3 candidates in parallel (the items now come with the route) | 1.43 ms | **0.66 ms** |
+| Routes from the files = routes in memory | 2,000 of 2,000 | 2,000 of 2,000 |
+
+Tested and not kept: a shorter search of the common lower neighbours (no gain: the cost is the lookups of each
+candidate, not the walk), and stall-on-demand in the search (0.44 against 0.40 ms: the check costs more than it
+saves).
+
+```bash
+tileroute build area.duckdb -o folder --by-tile --partition 16 --xyz-files --cch --metrics time,length,mix50 --middle-nodes
+```
+
 ## Weights for each query: the best of a few routes
 
 A query can give its own weights: cost = w₁ · time + w₂ · length + … A customization for each query takes seconds,

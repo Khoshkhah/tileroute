@@ -60,15 +60,19 @@ struct Row {
     lo: u32,
     hi: u32,
     cost: Vec<[f64; 2]>,
+    /// the middle node of each direction (node number; u32::MAX: an input arc)
+    via: Vec<[u32; 2]>,
 }
 
 fn write_rows(f: &mut impl Write, rows: &[Row]) -> io::Result<()> {
     for r in rows {
         f.write_all(&r.lo.to_le_bytes())?;
         f.write_all(&r.hi.to_le_bytes())?;
-        for c in &r.cost {
+        for (c, v) in r.cost.iter().zip(&r.via) {
             f.write_all(&c[0].to_le_bytes())?;
             f.write_all(&c[1].to_le_bytes())?;
+            f.write_all(&v[0].to_le_bytes())?;
+            f.write_all(&v[1].to_le_bytes())?;
         }
     }
     Ok(())
@@ -77,8 +81,9 @@ fn write_rows(f: &mut impl Write, rows: &[Row]) -> io::Result<()> {
 fn read_rows(path: &Path, m: usize) -> io::Result<Vec<Row>> {
     let mut b = Vec::new();
     BufReader::new(File::open(path)?).read_to_end(&mut b)?;
-    let size = 8 + 16 * m;
+    let size = 8 + 24 * m;
     let f64_at = |i: usize| f64::from_le_bytes(b[i..i + 8].try_into().expect("8 bytes"));
+    let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().expect("4 bytes"));
     Ok(b.chunks_exact(size)
         .enumerate()
         .map(|(n, c)| {
@@ -86,7 +91,8 @@ fn read_rows(path: &Path, m: usize) -> io::Result<Vec<Row>> {
             Row {
                 lo: u32::from_le_bytes(c[0..4].try_into().expect("4")),
                 hi: u32::from_le_bytes(c[4..8].try_into().expect("4")),
-                cost: (0..m).map(|k| [f64_at(i + 8 + 16 * k), f64_at(i + 16 + 16 * k)]).collect(),
+                cost: (0..m).map(|k| [f64_at(i + 8 + 24 * k), f64_at(i + 16 + 24 * k)]).collect(),
+                via: (0..m).map(|k| [u32_at(i + 24 + 24 * k), u32_at(i + 28 + 24 * k)]).collect(),
             }
         })
         .collect())
@@ -99,7 +105,7 @@ struct NodeRec {
     rank: u32,
     edge: i64,
     item: [f32; 2],
-    up: Vec<(u32, Vec<(f64, f64, bool, bool)>)>,
+    up: Vec<(u32, Vec<(f64, f64, bool, bool, u32, u32)>)>,
     lower: Vec<u32>,
 }
 
@@ -112,10 +118,12 @@ fn write_node(f: &mut impl Write, r: &NodeRec) -> io::Result<()> {
     f.write_all(&(r.up.len() as u32).to_le_bytes())?;
     for (w, ms) in &r.up {
         f.write_all(&w.to_le_bytes())?;
-        for &(u, d, ku, kd) in ms {
+        for &(u, d, ku, kd, vu, vd) in ms {
             f.write_all(&u.to_le_bytes())?;
             f.write_all(&d.to_le_bytes())?;
             f.write_all(&[ku as u8, kd as u8])?;
+            f.write_all(&vu.to_le_bytes())?;
+            f.write_all(&vd.to_le_bytes())?;
         }
     }
     f.write_all(&(r.lower.len() as u32).to_le_bytes())?;
@@ -145,8 +153,10 @@ fn read_nodes(path: &Path, m: usize) -> io::Result<Vec<NodeRec>> {
         for _ in 0..k {
             let w = u32_at(i);
             i += 4;
-            let ms = (0..m).map(|j| (f64_at(i + 18 * j), f64_at(i + 18 * j + 8), b[i + 18 * j + 16] == 1, b[i + 18 * j + 17] == 1)).collect();
-            i += 18 * m;
+            let ms = (0..m)
+                .map(|j| (f64_at(i + 26 * j), f64_at(i + 26 * j + 8), b[i + 26 * j + 16] == 1, b[i + 26 * j + 17] == 1, u32_at(i + 26 * j + 18), u32_at(i + 26 * j + 22)))
+                .collect();
+            i += 26 * m;
             up.push((w, ms));
         }
         let k = u32_at(i) as usize;
@@ -160,7 +170,8 @@ fn read_nodes(path: &Path, m: usize) -> io::Result<Vec<NodeRec>> {
 
 /// Build the folder of `build --cch` one unit (cell of zoom `tz + 1`) at a time, with the cells from the partition.
 #[allow(clippy::too_many_arguments)]
-pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, names: &[String], dir: &Path) -> Result<Report, String> {
+/// `middle`: also write the middle node of each edge (a faster unpack, more disk).
+pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, middle: bool, names: &[String], dir: &Path) -> Result<Report, String> {
     let kinds: Vec<Kind> = names.iter().map(|n| kind(n)).collect::<Result<_, _>>()?;
     let nm = kinds.len();
     let mut times = Vec::new();
@@ -319,7 +330,7 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
     let unit_file = |key: u64| tmp.join(format!("unit_{key}.bin"));
     // between two top nodes: the fill edges, and the best triangle costs (for each metric: up, down)
     let mut top_fill: Vec<(u32, u32)> = Vec::new();
-    let mut top_tri: HashMap<(u32, u32), Vec<[f64; 2]>> = HashMap::new();
+    let mut top_tri: HashMap<(u32, u32), Vec<([f64; 2], [u32; 2])>> = HashMap::new();
     let mut edges = 0usize;
     for (key, range) in &units {
         let vs = &unit_nodes[range.clone()];
@@ -372,6 +383,8 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
         // the customization of all metrics: cu = lower → higher, cd = higher → lower
         let mut cu = vec![vec![f64::INFINITY; other.len()]; nm];
         let mut cd = vec![vec![f64::INFINITY; other.len()]; nm];
+        let mut vu = vec![vec![u32::MAX; other.len()]; nm];
+        let mut vd = vec![vec![u32::MAX; other.len()]; nm];
         for &(a, b, u, c) in &arcs_l {
             let (lo, hi, upward) = if ord(a) < ord(b) { (a, b, true) } else { (b, a, false) };
             let e = edge_of(lo as usize, hi);
@@ -388,14 +401,26 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
                     if (y as usize) < k {
                         let e = edge_of(y as usize, z);
                         for m in 0..nm {
-                            cu[m][e] = cu[m][e].min(cd[m][i] + cu[m][j]);
-                            cd[m][e] = cd[m][e].min(cd[m][j] + cu[m][i]);
+                            if cd[m][i] + cu[m][j] < cu[m][e] {
+                                cu[m][e] = cd[m][i] + cu[m][j];
+                                vu[m][e] = glob[x];
+                            }
+                            if cd[m][j] + cu[m][i] < cd[m][e] {
+                                cd[m][e] = cd[m][j] + cu[m][i];
+                                vd[m][e] = glob[x];
+                            }
                         }
                     } else {
-                        let t = top_tri.entry((glob[y as usize], glob[z as usize])).or_insert_with(|| vec![[f64::INFINITY; 2]; nm]);
+                        let t = top_tri.entry((glob[y as usize], glob[z as usize])).or_insert_with(|| vec![([f64::INFINITY; 2], [u32::MAX; 2]); nm]);
                         for m in 0..nm {
-                            t[m][0] = t[m][0].min(cd[m][i] + cu[m][j]);
-                            t[m][1] = t[m][1].min(cd[m][j] + cu[m][i]);
+                            if cd[m][i] + cu[m][j] < t[m].0[0] {
+                                t[m].0[0] = cd[m][i] + cu[m][j];
+                                t[m].1[0] = glob[x];
+                            }
+                            if cd[m][j] + cu[m][i] < t[m].0[1] {
+                                t[m].0[1] = cd[m][j] + cu[m][i];
+                                t[m].1[1] = glob[x];
+                            }
                         }
                     }
                 }
@@ -403,7 +428,12 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
         }
         let rows: Vec<Row> = (0..k)
             .flat_map(|x| (off[x]..off[x + 1]).map(move |i| (x, i)))
-            .map(|(x, i)| Row { lo: glob[x], hi: glob[other[i] as usize], cost: (0..nm).map(|m| [cu[m][i], cd[m][i]]).collect() })
+            .map(|(x, i)| Row {
+                lo: glob[x],
+                hi: glob[other[i] as usize],
+                cost: (0..nm).map(|m| [cu[m][i], cd[m][i]]).collect(),
+                via: (0..nm).map(|m| [vu[m][i], vd[m][i]]).collect(),
+            })
             .collect();
         let mut f = BufWriter::new(File::create(unit_file(*key)).map_err(err)?);
         write_rows(&mut f, &rows).map_err(err)?;
@@ -422,10 +452,34 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
         .map(|m| {
             let mut a: Vec<(u32, u32, f64)> = top_arcs.iter().map(|&(u, w, c)| (u, w, cost(m, u, c))).collect();
             for (&(y, z), c) in &top_tri {
-                a.push((y, z, c[m][0]));
-                a.push((z, y, c[m][1]));
+                a.push((y, z, c[m].0[0]));
+                a.push((z, y, c[m].0[1]));
             }
             top.customize(&a, false)
+        })
+        .collect();
+    // the middle node of each top edge and metric: from a top triangle (in the top's own ranks), else from the best
+    // triangle cost of the units when it gives the cost of the edge, else none (an input arc)
+    let top_via: Vec<[Vec<u32>; 2]> = (0..nm)
+        .map(|m| {
+            let mut v = [vec![u32::MAX; top.n_edges()], vec![u32::MAX; top.n_edges()]];
+            for r in 0..ntop as u32 {
+                let lo = top.order[r as usize];
+                for e in top.row(r) {
+                    let hi = top.order[top.up[e] as usize];
+                    for (dir, (via, cost)) in [(&top_m[m].via_up, &top_m[m].up), (&top_m[m].via_down, &top_m[m].down)].into_iter().enumerate() {
+                        v[dir][e] = if via[e] != u32::MAX {
+                            top.order[via[e] as usize]
+                        } else {
+                            match top_tri.get(&(lo, hi)) {
+                                Some(t) if t[m].0[dir] == cost[e] => t[m].1[dir],
+                                _ => u32::MAX,
+                            }
+                        };
+                    }
+                }
+            }
+            v
         })
         .collect();
     drop((top_fill, top_tri));
@@ -489,7 +543,7 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
             .collect();
         let mut recs: HashMap<u32, NodeRec> = vs.iter().map(|&v| (v, NodeRec { num: v, rank: rank[v as usize], edge: edge[v as usize], item: item(v), up: Vec::new(), lower: Vec::new() })).collect();
         for (j, r) in rows.iter().enumerate() {
-            recs.get_mut(&r.lo).expect("a node of the unit").up.push((r.hi, (0..nm).map(|m| (r.cost[m][0], r.cost[m][1], keep[2 * m][j], keep[2 * m + 1][j])).collect()));
+            recs.get_mut(&r.lo).expect("a node of the unit").up.push((r.hi, (0..nm).map(|m| (r.cost[m][0], r.cost[m][1], keep[2 * m][j], keep[2 * m + 1][j], r.via[m][0], r.via[m][1])).collect()));
             if (r.hi as usize) < ntop {
                 top_lower[r.hi as usize].push(r.lo);
             } else {
@@ -516,7 +570,7 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
             let mut rec = NodeRec { num: v, rank: rank[v as usize], edge: edge[v as usize], item: item(v), up: Vec::new(), lower: std::mem::take(&mut top_lower[v as usize]) };
             for e in top.row(r) {
                 let w = top.order[top.up[e] as usize];
-                rec.up.push((w, (0..nm).map(|m| (top_m[m].up[e], top_m[m].down[e], kept(m, 0, v, w), kept(m, 1, v, w))).collect()));
+                rec.up.push((w, (0..nm).map(|m| (top_m[m].up[e], top_m[m].down[e], kept(m, 0, v, w), kept(m, 1, v, w), top_via[m][0][e], top_via[m][1][e])).collect()));
                 let _ = e;
             }
             // the lower neighbours inside the top
@@ -543,7 +597,17 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
         if recs.len() != k as usize {
             return Err(format!("file {key}: {} nodes, expected {k}", recs.len()));
         }
-        let mut d = FileData { rank: Vec::new(), edge: Vec::new(), item: Vec::new(), off: vec![0], other: Vec::new(), doff: vec![0], down: Vec::new(), metrics: vec![(Vec::new(), Vec::new(), Vec::new(), Vec::new()); nm] };
+        let mut d = FileData {
+            rank: Vec::new(),
+            edge: Vec::new(),
+            item: Vec::new(),
+            off: vec![0],
+            other: Vec::new(),
+            doff: vec![0],
+            down: Vec::new(),
+            metrics: vec![(Vec::new(), Vec::new(), Vec::new(), Vec::new()); nm],
+            via: if middle { vec![(Vec::new(), Vec::new()); nm] } else { Vec::new() },
+        };
         let mut bits: Vec<[Vec<bool>; 2]> = vec![[Vec::new(), Vec::new()]; nm];
         for mut r in recs {
             d.rank.push(r.rank);
@@ -552,9 +616,13 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
             r.up.sort_unstable_by_key(|x| x.0);
             for (w, ms) in &r.up {
                 d.other.push(*w);
-                for (m, &(u, dn, ku, kd)) in ms.iter().enumerate() {
+                for (m, &(u, dn, ku, kd, vu, vd)) in ms.iter().enumerate() {
                     d.metrics[m].0.push(u);
                     d.metrics[m].1.push(dn);
+                    if middle {
+                        d.via[m].0.push(vu);
+                        d.via[m].1.push(vd);
+                    }
                     bits[m][0].push(ku);
                     bits[m][1].push(kd);
                 }

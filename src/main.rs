@@ -289,7 +289,8 @@ fn build(args: &[String]) -> Result<(), String> {
             // the structure with no costs and the costs of each metric, one unit at a time
             let leaf = leaf.ok_or("--by-tile --cch needs --partition")?;
             let names: Vec<String> = arg(args, "--metrics").map_or("time", |s| s.as_str()).split(',').map(String::from).collect();
-            let r = tileroute::cchbuild::build(db.as_ref(), mode, finest, top, leaf, xyz, &names, dir.as_ref())?;
+            let middle = args.iter().any(|a| a == "--middle-nodes");
+            let r = tileroute::cchbuild::build(db.as_ref(), mode, finest, top, leaf, xyz, middle, &names, dir.as_ref())?;
             println!(
                 "built unit by unit: {} nodes ({} in the top), {} arcs, {} edges, {} files, {:.1} MB",
                 r.nodes, r.top_nodes, r.arcs, r.edges, r.files, r.bytes as f64 / 1e6
@@ -681,7 +682,7 @@ fn build_cch(args: &[String], net: &load::Network, db: &std::path::Path, mode: &
     let items = node_items(net, db, mode)?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("means.txt"), format!("{mt} {ml}\n")).map_err(|e| e.to_string())?;
-    let bytes = tileroute::cchdisk::write(&c, &named, &net.graph.ids, &items, &net.level, &net.cell, xyz.then_some(&net.home[..]), top, dir).map_err(|e| e.to_string())?;
+    let bytes = tileroute::cchdisk::write(&c, &named, &net.graph.ids, &items, &net.level, &net.cell, xyz.then_some(&net.home[..]), top, args.iter().any(|a| a == "--middle-nodes"), dir).map_err(|e| e.to_string())?;
     let size = |sub: &str| -> u64 { std::fs::read_dir(dir.join(sub)).map(|d| d.filter_map(|e| e.ok()?.metadata().ok()).map(|m| m.len()).sum()).unwrap_or(0) };
     println!("wrote {}: {:.1} MB in all, {:.2} s; structure {:.1} MB", dir.display(), bytes as f64 / 1e6, t.elapsed().as_secs_f64(), size("structure") as f64 / 1e6);
     for name in &names {
@@ -722,7 +723,7 @@ fn weigh(args: &[String]) -> Result<(), String> {
     let found: Vec<Vec<Option<[f64; 2]>>> = pairs
         .iter()
         .map(|&(a, b)| {
-            cands.par_iter().map(|(_, s)| s.route(a, b).ok().and_then(|r| r.0).map(|(_, p)| s.items(&p).expect("items"))).collect()
+            cands.par_iter().map(|(_, s)| s.route_items(a, b).ok().and_then(|r| r.0).map(|r| r.2)).collect()
         })
         .collect();
     let wait = t.elapsed().as_secs_f64() / pairs.len().max(1) as f64 * 1e3;

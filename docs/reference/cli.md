@@ -55,6 +55,7 @@ tileroute build kentucky.duckdb -o kentucky.tiles
 | `--mode` | `driving` | The duckOSM mode |
 | `--finest` | `20` | The finest level |
 | `--cch` | off | Write the structure with no costs and one folder of costs for each metric, not the hierarchy (in memory; with `--by-tile --partition`, one unit at a time) ([In the tile files](../explanation/customization.md#in-the-tile-files)) |
+| `--middle-nodes` | off | With `--cch`: also write the middle node of each edge for each metric: a faster unpack (Kentucky 0.59 → 0.40 ms), 50% more disk for each metric |
 | `--metrics LIST` | `time` | With `--cch`: the metrics, comma separated: `time`, `length`, `mixNN` (NN% time and the rest length, each divided by its mean) |
 | `--by-tile` | off | Prepare one zoom-8 tile at a time, with much less memory ([The preparation tile by tile](../explanation/build-by-tile.md)); the files are the same format |
 | `--xyz-files` | off | With `--partition` (in memory or `--by-tile`): one file for each zoom-8 XYZ tile, not for each partition cell ([The three versions](../explanation/partition.md#the-three-versions)) |
