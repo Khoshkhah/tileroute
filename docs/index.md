@@ -6,8 +6,8 @@ only the tiles that it needs, so that a country does not need all of its graph i
 
 !!! note "Status, 2026-11-18"
     The shortcuts and the query work in memory. Each route is equal to the route of duckOSM's router (Monaco: all
-    7.6 million pairs; Kentucky and four Vancouver areas: 10,000 random pairs each). The tile files on disk, the
-    browser version, the weights, the combined modes and the timetable are designed ([Plan](plan.md)), not made yet.
+    7.6 million pairs; Kentucky and four Vancouver areas: 10,000 random pairs each). Since 2026-11-19 the hierarchy
+    is also in [tile files](reference/tile-files.md) on disk, and a query reads only its tiles. The browser version, the weights, the combined modes and the timetable are designed ([Plan](plan.md)), not made yet.
 
 ## Start
 
@@ -28,6 +28,7 @@ only the tiles that it needs, so that a country does not need all of its graph i
 | How tileroute is different from OSRM, GraphHopper, Valhalla | [Comparison with other routers](explanation/engines.md) |
 | How to run it | [The command line](reference/cli.md) |
 | Time, memory and checks | [Measurements](reference/measurements.md) |
+| How the hierarchy is stored in tile files, and what a query reads | [Tile files](reference/tile-files.md) |
 
 ## In one table
 

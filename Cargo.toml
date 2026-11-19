@@ -8,6 +8,8 @@ description = "Route on a road network stored by XYZ map tiles, with a hierarchy
 repository = "https://github.com/Khoshkhah/tileroute"
 
 [dependencies]
+# mmap and getrusage for the tile files (already a dependency of duckdb)
+libc = "0.2"
 # the input: a duckOSM database (the same version as duckOSM)
 duckdb = { version = "=1.10506.1", features = ["bundled"] }
 # the tiles of one zoom are contracted on all threads
