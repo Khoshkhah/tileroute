@@ -9,7 +9,8 @@ tile, natively and in the browser.
 |---|---|
 | Shortcuts by tile (bottom-up, set version) | done, 0 wrong routes on all checks |
 | Query in memory | done: Kentucky 24 ms against 811 ms for duckOSM's router |
-| Top-down phase, triangle version | measured, not kept ([The top-down phase](explanation/top-down.md), [Updates](explanation/updates.md)) |
+| Top-down phase, triangle version | measured, not kept, code removed ([The top-down phase](explanation/top-down.md), [Updates](explanation/updates.md)) |
+| Every shortcut pair kept (for the rebuild and the weights) | done (M2) |
 | Tile files on disk, browser | not started |
 | Weights, modes, timetable | design on these pages |
 
@@ -54,7 +55,7 @@ So the shortcuts do not hold time functions; they only make the exact time-depen
 
 | Step | Work | Done means |
 |---|---|---|
-| **M2 Clean up** | Remove the top-down and triangle code; keep every shortcut pair (needed for the vectors and for the rebuild) | all checks pass; the code has one method |
+| **M2 Clean up** (done) | Remove the top-down and triangle code; keep every shortcut pair (needed for the vectors and for the rebuild) | all checks pass; the code has one method |
 | **M3 Tile files** | One file for each zoom-8 tile with the shortcuts of its tiles, an archive of all files, memory-mapped reads, the edge index | a query reads only its tiles; the routes are equal to the in-memory routes; reads and time measured for each query |
 | **M4 Rebuild** | `tileroute rebuild` with new costs from duckOSM (or from SonoFlow flows), structure kept, new tile files | the routes equal a new preparation; rebuild time of Kentucky and France (Mac mini) measured |
 | **M5 Items and weights** | duckOSM gives the items (time, length, turn types, traffic lights) as columns of `edge_graph`; tileroute keeps the hull corners for each shortcut; the query takes the weights | for random weights, 0 wrong routes against duckOSM's router with the same cost; corners, size and time measured for 2 and 3 items |

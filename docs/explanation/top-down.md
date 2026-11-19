@@ -1,7 +1,11 @@
 # The top-down phase
 
-h3-routing-platform has two passes: bottom-up, then top-down. tileroute has the top-down phase as an option
-(`tileroute check --lca`). This page says what it does and what the measurements show.
+h3-routing-platform has two passes: bottom-up, then top-down. tileroute had the top-down phase as an option. This page
+says what it does and what the measurements show.
+
+!!! note "Not kept"
+    The measurements below show too little gain for its cost, so the code was removed (milestone M2). It is in the git
+    history, at commit `e39a78e` (`tileroute check --lca`).
 
 ## What it does
 

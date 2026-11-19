@@ -16,6 +16,9 @@ build of 2026-11-18; Somerset, Burnaby, Vancouver city and Metro Vancouver are t
 
 ¹ The peak of a whole run: read, shortcuts and 10,000 queries (Kentucky: 2,000).
 
+"Shortcuts" counts the new arcs. Since M2, tileroute also keeps every shortcut pair that a step makes, also when a
+direct arc is cheaper (for the rebuild): Monaco 6,061 pairs, Burnaby 396,650, Metro Vancouver 4,805,290.
+
 ## Routes: correctness
 
 Each route is compared with duckOSM's router (`duckosm-router`, networkx order).
