@@ -1,0 +1,21 @@
+[package]
+name = "tileroute"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Kaveh Khoshkhah"]
+description = "Route on a road network stored by XYZ map tiles, with a hierarchy of shortcuts by tile"
+repository = "https://github.com/Khoshkhah/tileroute"
+
+[dependencies]
+# the input: a duckOSM database (the same version as duckOSM)
+duckdb = { version = "=1.10506.1", features = ["bundled"] }
+# the tiles of one zoom are contracted on all threads
+rayon = "1.12"
+# the reference: duckOSM's router (networkx order). No dependencies of its own.
+duckosm-router = { git = "https://github.com/Khoshkhah/duckOSM", package = "duckosm-router" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
