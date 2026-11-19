@@ -8,6 +8,7 @@ export PATH=$HOME/.cargo/bin:/opt/homebrew/bin:/opt/homebrew/opt/openjdk/bin:$PA
 cd "$(dirname "$0")"
 PBF=$HOME/remote/data/france-latest.osm.pbf
 TR=src-tr/target/release/tileroute
+TRARGS=${TRARGS:-}  # more build options, for example "--partition 16"
 DUCKOSM=$HOME/remote/no-osmium-gdal/rust/target/release/duckosm
 ONLY=${ONLY:-}
 mkdir -p results work
@@ -52,10 +53,10 @@ if want tileroute; then
   measure slim $TR slim work/france.duckdb work/france-slim.duckdb
   rm -f work/france.duckdb
   step "tileroute build --by-tile"
-  measure tileroute-build $TR build work/france-slim.duckdb -o work/tiles --by-tile
+  measure tileroute-build $TR build work/france-slim.duckdb -o work/tiles --by-tile $TRARGS
   du -sh work/tiles | sed 's/^/tileroute files: /' | tee -a results/prepare.txt
   step "tileroute queries: 2,000 random pairs, one thread, a cold and a warm pass"
-  /usr/bin/time -l $TR route work/tiles --random 2000 --write results/pairs.csv > results/tileroute-route.txt 2> work/route.time
+  /usr/bin/time -l $TR route work/tiles ${ROUTEARGS:---random 2000 --write results/pairs.csv} > results/tileroute-route.txt 2> work/route.time
   cat results/tileroute-route.txt | tee -a results/queries.txt
   grep "maximum resident" work/route.time | tee -a results/queries.txt
   $TR points work/france-slim.duckdb results/pairs.csv results/points.csv
