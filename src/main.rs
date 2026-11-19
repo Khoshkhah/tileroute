@@ -31,6 +31,7 @@ fn run() -> Result<(), String> {
         Some("build") => return build(&args),
         Some("route") => return route_files(&args),
         Some("slim") => return slim(&args),
+        Some("points") => return points(&args),
         _ => {}
     }
     let opt = |name: &str, default: &str| -> String {
@@ -323,6 +324,30 @@ fn slim(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `tileroute points <db> <pairs.csv> <out.csv> [--mode driving]`: for each pair (source, target, cost), the point where
+/// the source road edge starts and the point where the target road edge ends, and the cost of the target edge (for
+/// other routers, which take points).
+fn points(args: &[String]) -> Result<(), String> {
+    let (Some(db), Some(pairs), Some(out)) = (args.get(1), args.get(2), args.get(3)) else {
+        return Err("usage: tileroute points <db> <pairs.csv> <out.csv> [--mode driving]".into());
+    };
+    let mode = arg(args, "--mode").map_or("driving", |s| s.as_str());
+    let con = load::open(db.as_ref())?;
+    con.execute_batch(&format!(
+        "LOAD spatial;
+         COPY (SELECT p.source, p.target, p.cost,
+                      ST_X(a.geom) AS lon1, ST_Y(a.geom) AS lat1, ST_X(b.geom) AS lon2, ST_Y(b.geom) AS lat2,
+                      (SELECT min(g.cost)::DOUBLE FROM {mode}.edge_graph g WHERE g.from_edge = p.target) AS target_cost
+               FROM read_csv('{pairs}') p
+               JOIN {mode}.edges e1 ON e1.edge_id = p.source JOIN {mode}.nodes a ON a.node_id = e1.source
+               JOIN {mode}.edges e2 ON e2.edge_id = p.target JOIN {mode}.nodes b ON b.node_id = e2.target)
+         TO '{out}' (HEADER);"
+    ))
+    .map_err(|e| e.to_string())?;
+    println!("wrote {out}");
+    Ok(())
+}
+
 /// The memory lines of this process from /proc (Linux only).
 fn proc_memory() -> String {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -367,6 +392,8 @@ fn route_files(args: &[String]) -> Result<(), String> {
         .collect::<Result<_, _>>()?
     };
     println!("opened {dir}: {} tile files; process {:.1} MB peak", store.n_files(), disk::peak_rss() as f64 / 1e6);
+    // --write CSV: the cost of each pair (the sum of the arc costs; -1: no path), from the first pass
+    let mut write: Option<String> = arg(args, "--write").map(|_| String::from("source,target,cost\n"));
     // two passes on one thread: the first maps the files, the second finds them in the cache of the operating system
     for pass in ["first", "second"] {
         let (mut ms, mut tiles, mut bytes, mut max_t, mut max_b, mut found) = (0.0, 0usize, 0usize, 0usize, 0usize, 0usize);
@@ -374,6 +401,11 @@ fn route_files(args: &[String]) -> Result<(), String> {
             let t = Instant::now();
             let (r, st) = store.route(a, b).map_err(|e| e.to_string())?;
             ms += t.elapsed().as_secs_f64() * 1e3;
+            if pass == "first" {
+                if let Some(w) = write.as_mut() {
+                    w.push_str(&format!("{a},{b},{}\n", r.as_ref().map_or(-1.0, |x| x.0)));
+                }
+            }
             found += r.is_some() as usize;
             tiles += st.tiles;
             bytes += st.bytes;
@@ -389,6 +421,9 @@ fn route_files(args: &[String]) -> Result<(), String> {
             bytes as f64 / k / 1e3,
             max_b as f64 / 1e3
         );
+    }
+    if let (Some(path), Some(w)) = (arg(args, "--write"), write) {
+        std::fs::write(path, w).map_err(|e| format!("{path}: {e}"))?;
     }
     println!("files mapped: {}; peak memory of this process: {:.1} MB ({})", store.mapped.load(std::sync::atomic::Ordering::Relaxed), disk::peak_rss() as f64 / 1e6, proc_memory());
     Ok(())
