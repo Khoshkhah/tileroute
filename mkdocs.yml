@@ -62,6 +62,7 @@ nav:
       - Timetable: explanation/timetable.md
       - Predicted traffic: explanation/predicted-traffic.md
       - Comparison with h3-routing-platform: explanation/comparison.md
+      - Comparison with other routers: explanation/engines.md
   - Plan: plan.md
   - Reference:
       - The command line: reference/cli.md
