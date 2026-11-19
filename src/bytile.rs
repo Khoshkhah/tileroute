@@ -1,11 +1,12 @@
 //! The preparation tile by tile (`tileroute build --by-tile`): it holds one tile of zoom top + 1 (default 8) at a time, not the whole
 //! network. The files are the same as those of `Hierarchy::write_files` (see `docs/explanation/build-by-tile.md`).
 //!
-//! 1. The nodes: level, cell, file and final node number of each road edge.
-//! 2. The arcs, as a stream, into bucket files: the bucket of the zoom-8 tile of a fine node, or the top bucket.
-//! 3. For each zoom-8 tile: the steps of zoom 20 to 8 on its bucket; the result into a file of the tile.
-//! 4. The top (level 7 and coarser): its arcs and the top shortcuts of all tiles; the steps of zoom 7 to 1.
-//! 5. For each zoom-8 tile: arc reduction with the top, then its tile file; then the top file and the indexes.
+//! 1. The nodes: level, cell, build unit (the cell of zoom top + 1), file and final node number of each road edge.
+//! 2. The arcs, as a stream, into bucket files: the bucket of the unit of a fine node, or the top bucket.
+//! 3. For each unit: the steps of the finest zoom to top + 1 on its bucket; the result into a file of the unit.
+//! 4. The top: its arcs and the top shortcuts of all units; the steps of the top zoom to 1.
+//! 5. For each unit: arc reduction with the top; the arcs of each node into the bucket of its file. Then each file
+//!    (the units, or the zoom-8 XYZ tiles with `--xyz-files`), the top file and the indexes.
 
 use crate::disk::{self, AArc, SArc};
 use crate::hier::{reduce, reduce_from, run_steps, Arc, Fast, Steps};
@@ -137,7 +138,14 @@ fn read_bucket(path: &Path) -> io::Result<Vec<(u32, u32, f64)>> {
 /// Build the tile files of `db` (mode `mode`) in `dir`, one tile of zoom `tz + 1` at a time; the nodes of level `tz`
 /// and coarser are the top. `leaf`: the cells from the partition (`load::partition_levels`), not from the tiles. The
 /// temporary files go to `dir/.build` and are removed at the end.
-pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir: &Path) -> Result<Report, String> {
+///
+/// The **build units** are the cells of zoom `tz + 1`: the steps of one unit need only its bucket. The **files** are
+/// the same cells, or with `xyz` (needs `leaf`) the zoom-8 XYZ tile of the first junction of each road edge: the order
+/// comes from the partition, the files follow the project's tiles.
+pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, xyz: bool, dir: &Path) -> Result<Report, String> {
+    if xyz && leaf.is_none() {
+        return Err("--xyz-files needs --partition".into());
+    }
     let mut times = Vec::new();
     let t = std::time::Instant::now();
     std::fs::create_dir_all(dir).map_err(err)?;
@@ -147,12 +155,13 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir
     let relation = load::relation(&con, mode)?;
 
     // 1. the nodes: the road edges, and the edges of the graph that are not in `edges` (level 0)
-    let mut nodes: Vec<(i64, u8, u64)> = Vec::new();
+    // (edge id, level, cell, zoom-8 XYZ tile of the first junction)
+    let mut nodes: Vec<(i64, u8, u64, u64)> = Vec::new();
     match leaf {
         Some(leaf) => {
-            load::partition_levels(&con, mode, finest, leaf, |id, z, c, _| nodes.push((id, z, c)))?;
+            load::partition_levels(&con, mode, finest, leaf, |id, z, c, h| nodes.push((id, z, c, h)))?;
         }
-        None => load::edge_levels(&con, mode, finest, |id, z, c| nodes.push((id, z, c)))?,
+        None => load::edge_levels(&con, mode, finest, |id, z, c| nodes.push((id, z, c, 0)))?,
     }
     {
         let mut st = con
@@ -163,17 +172,19 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir
             .map_err(err)?;
         let mut rows = st.query([]).map_err(err)?;
         while let Some(r) = rows.next().map_err(err)? {
-            nodes.push((r.get(0).map_err(err)?, 0, 0));
+            nodes.push((r.get(0).map_err(err)?, 0, 0, 0));
         }
     }
     nodes.sort_unstable_by_key(|x| x.0);
     nodes.dedup_by_key(|x| x.0);
+    // the build unit of a node (0: the top), and its file
     let key_of = |z: u8, c: u64| if z <= tz { 0 } else { tile::parent(c, tz + 1) };
+    let file_of = |z: u8, c: u64, h: u64| if z <= tz { 0 } else if xyz { h } else { key_of(z, c) };
     // the final node numbers: by file (the top first), then by level, then by cell
     let mut order: Vec<u32> = (0..nodes.len() as u32).collect();
     order.sort_unstable_by_key(|&i| {
-        let (_, z, c) = nodes[i as usize];
-        (key_of(z, c), z, c, i)
+        let (_, z, c, h) = nodes[i as usize];
+        (file_of(z, c, h), z, c, i)
     });
     let n = nodes.len();
     let mut num = vec![0u32; n];
@@ -184,13 +195,14 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir
     let level: Vec<u8> = order.iter().map(|&i| nodes[i as usize].1).collect();
     let cell: Vec<u64> = order.iter().map(|&i| nodes[i as usize].2).collect();
     let edge: Vec<i64> = order.iter().map(|&i| nodes[i as usize].0).collect();
+    let file_key: Vec<u64> = order.iter().map(|&i| { let (_, z, c, h) = nodes[i as usize]; file_of(z, c, h) }).collect();
     let ids: Vec<i64> = nodes.iter().map(|x| x.0).collect();
     drop(nodes);
     let node_of = |id: i64| ids.binary_search(&id).ok().map(|i| num[i]);
     // the files: (first node, nodes, key)
     let mut files: Vec<(u32, u32, u64)> = Vec::new();
     for v in 0..n as u32 {
-        let key = key_of(level[v as usize], cell[v as usize]);
+        let key = file_key[v as usize];
         match files.last_mut() {
             Some(f) if f.2 == key => f.1 += 1,
             _ => files.push((v, 1, key)),
@@ -200,7 +212,19 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir
         files.insert(0, (0, 0, 0));
     }
     let ntop = files[0].1 as usize;
+    drop(file_key);
     let key_of_node = |v: u32| key_of(level[v as usize], cell[v as usize]);
+    // the build units: the nodes below the top, by unit (and in a unit by node number)
+    let mut unit_nodes: Vec<u32> = (ntop as u32..n as u32).collect();
+    unit_nodes.sort_unstable_by_key(|&v| (key_of_node(v), v));
+    let mut units: Vec<(u64, std::ops::Range<usize>)> = Vec::new();
+    for (i, &v) in unit_nodes.iter().enumerate() {
+        let key = key_of_node(v);
+        match units.last_mut() {
+            Some(u) if u.0 == key => u.1.end = i + 1,
+            _ => units.push((key, i..i + 1)),
+        }
+    }
     times.push(("nodes", t.elapsed().as_secs_f64()));
 
     // 2. the arcs into bucket files
@@ -242,11 +266,12 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir
     let result = |key: u64| tmp.join(format!("result_{key}.bin"));
     // the shortcuts between two top nodes, from all tiles: the cheapest of each pair
     let mut top_short: HashMap<(u32, u32), (f64, Vec<u32>)> = HashMap::new();
-    for &(first, k, key) in files.iter().filter(|f| f.2 != 0) {
+    for (key, range) in &units {
+        let key = *key;
         let mut g = Local::new();
         let mut paths: Vec<u32> = Vec::new();
-        // the fine nodes of the tile first, so that each has a local number even with no arc
-        for v in first..first + k {
+        // the fine nodes of the unit first, so that each has a local number even with no arc
+        for &v in &unit_nodes[range.clone()] {
             g.node(v, &level, &cell);
         }
         for (u, w, c) in read_bucket(&bucket(key)).map_err(err)? {
@@ -331,23 +356,25 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir
     let mut bytes = 0u64;
     // the arcs of the top file to fine nodes (from the tiles)
     let mut top_out: Vec<Vec<(u32, f64, Vec<u32>)>> = vec![Vec::new(); ntop];
-    for &(first, k, key) in files.iter().filter(|f| f.2 != 0) {
-        let rows = read_rows(&result(key)).map_err(err)?;
-        let (first, k) = (first as usize, k as usize);
-        // local space for the reduction: the top 0..ntop, then the nodes of the tile
-        let loc = |g: u32| -> usize { if (g as usize) < ntop { g as usize } else { ntop + g as usize - first } };
-        let glob = |l: usize| -> u32 { if l < ntop { l as u32 } else { (first + l - ntop) as u32 } };
-        let mut up: Vec<Vec<(f64, u32)>> = top_up.iter().map(|r| r.iter().map(|&(c, w)| (c, w)).collect()).collect();
+    // for each unit: the arc reduction together with the top; the arcs of each node go to the bucket of its file
+    let part = |key: u64| tmp.join(format!("file_{key}.bin"));
+    let mut parts: HashMap<u64, BufWriter<File>> = HashMap::new();
+    for (key, range) in &units {
+        let rows = read_rows(&result(*key)).map_err(err)?;
+        let vs = &unit_nodes[range.clone()];
+        let k = vs.len();
+        // local space for the reduction: the top 0..ntop, then the nodes of the unit (sorted)
+        let loc = |g: u32| -> usize { if (g as usize) < ntop { g as usize } else { ntop + vs.binary_search(&g).expect("a node of the unit") } };
+        let glob = |l: usize| -> u32 { if l < ntop { l as u32 } else { vs[l - ntop] } };
+        let mut up: Vec<Vec<(f64, u32)>> = top_up.clone();
         let mut down: Vec<Vec<(f64, u32)>> = top_down.clone();
         up.resize(ntop + k, Vec::new());
         down.resize(ntop + k, Vec::new());
         let mut all: Vec<Vec<(u32, f64, Vec<u32>)>> = vec![Vec::new(); k];
         for r in rows {
             let (lu, lw) = (loc(r.u), loc(r.w));
-            if lu >= ntop {
-                if up_of(r.u, r.w) {
-                    up[lu].push((r.cost, lw as u32));
-                }
+            if lu >= ntop && up_of(r.u, r.w) {
+                up[lu].push((r.cost, lw as u32));
             }
             if lw >= ntop && up_of(r.w, r.u) {
                 down[lw].push((r.cost, lu as u32));
@@ -358,20 +385,42 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir
                 top_out[r.u as usize].push((r.w, r.cost, r.path));
             }
         }
-        // only the rows of the tile: the top is reduced once, for the top file
+        // only the rows of the unit: the top is reduced once, for the top file
         let (up, down) = (reduce_from(flat(&up), ntop), reduce_from(flat(&down), ntop));
-        let search = |f: &Fast| -> (Vec<u32>, Vec<SArc>) {
+        for (i, row) in all.into_iter().enumerate() {
+            let (l, v) = (ntop + i, vs[i]);
+            let fk = disk_key(v, &files);
+            let f = match parts.entry(fk) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => e.insert(BufWriter::new(File::create(part(fk)).map_err(err)?)),
+            };
+            let search = |f: &Fast| f.of(l as u32).iter().map(|&(c, w)| (c, glob(w as usize))).collect::<Vec<_>>();
+            write_node(f, v, &search(&up), &search(&down), &row).map_err(err)?;
+        }
+    }
+    for (_, mut f) in parts.drain() {
+        f.flush().map_err(err)?;
+    }
+    // each file: its nodes are one range of numbers
+    for &(first, k, key) in files.iter().filter(|f| f.2 != 0) {
+        let k = k as usize;
+        let mut ups: Vec<Vec<(f64, u32)>> = vec![Vec::new(); k];
+        let mut downs: Vec<Vec<(f64, u32)>> = vec![Vec::new(); k];
+        let mut all: Vec<Vec<(u32, f64, Vec<u32>)>> = vec![Vec::new(); k];
+        for (v, u, d, a) in read_nodes(&part(key)).map_err(err)? {
+            let i = (v - first) as usize;
+            (ups[i], downs[i], all[i]) = (u, d, a);
+        }
+        let search = |rows: &[Vec<(f64, u32)>]| -> (Vec<u32>, Vec<SArc>) {
             let mut off = vec![0u32];
             let mut arcs = Vec::new();
-            for l in ntop..ntop + k {
-                arcs.extend(f.of(l as u32).iter().map(|&(cost, w)| SArc { cost, other: glob(w as usize), pad: 0 }));
+            for r in rows {
+                arcs.extend(r.iter().map(|&(cost, w)| SArc { cost, other: w, pad: 0 }));
                 off.push(arcs.len() as u32);
             }
             (off, arcs)
         };
-        let (up_off, up) = search(&up);
-        let (down_off, down) = search(&down);
-        let b = tile_file(first as u32, k, &level, &cell, &edge, (up_off, up), (down_off, down), all);
+        let b = tile_file(first, k, &level, &cell, &edge, search(&ups), search(&downs), all);
         std::fs::write(dir.join(disk::file_name(key)), &b).map_err(err)?;
         bytes += b.len() as u64;
     }
@@ -409,6 +458,63 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir
     std::fs::remove_dir_all(&tmp).map_err(err)?;
     times.push(("files (arc reduction, tile by tile)", t.elapsed().as_secs_f64()));
     Ok(Report { nodes: n, arcs, tiles: files.len() - 1, top_nodes: ntop, bytes, times })
+}
+
+/// The file key of node `v`: `files` is (first node, nodes, key), by first node.
+fn disk_key(v: u32, files: &[(u32, u32, u64)]) -> u64 {
+    files[files.partition_point(|f| f.0 <= v) - 1].2
+}
+
+type NodeArcs = (u32, Vec<(f64, u32)>, Vec<(f64, u32)>, Vec<(u32, f64, Vec<u32>)>);
+
+/// One node of a file bucket: its number, its forward-search and backward-search arcs, and all its arcs with paths.
+fn write_node(f: &mut impl Write, v: u32, up: &[(f64, u32)], down: &[(f64, u32)], all: &[(u32, f64, Vec<u32>)]) -> io::Result<()> {
+    f.write_all(&v.to_le_bytes())?;
+    for s in [up, down] {
+        f.write_all(&(s.len() as u32).to_le_bytes())?;
+        for &(c, w) in s {
+            f.write_all(&c.to_le_bytes())?;
+            f.write_all(&w.to_le_bytes())?;
+        }
+    }
+    f.write_all(&(all.len() as u32).to_le_bytes())?;
+    for (w, c, p) in all {
+        write_row(f, &Row { u: v, w: *w, cost: *c, path: p.clone() })?;
+    }
+    Ok(())
+}
+
+fn read_nodes(path: &Path) -> io::Result<Vec<NodeArcs>> {
+    let mut b = Vec::new();
+    if path.exists() {
+        BufReader::new(File::open(path)?).read_to_end(&mut b)?;
+    }
+    let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().expect("4 bytes"));
+    let f64_at = |i: usize| f64::from_le_bytes(b[i..i + 8].try_into().expect("8 bytes"));
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let v = u32_at(i);
+        i += 4;
+        let mut two = [Vec::new(), Vec::new()];
+        for s in two.iter_mut() {
+            let k = u32_at(i) as usize;
+            i += 4;
+            *s = (0..k).map(|j| (f64_at(i + 12 * j), u32_at(i + 12 * j + 8))).collect();
+            i += 12 * k;
+        }
+        let k = u32_at(i) as usize;
+        i += 4;
+        let mut all = Vec::with_capacity(k);
+        for _ in 0..k {
+            let (w, c, m) = (u32_at(i + 4), f64_at(i + 8), u32_at(i + 16) as usize);
+            all.push((w, c, (0..m).map(|j| u32_at(i + 20 + 4 * j)).collect()));
+            i += 20 + 4 * m;
+        }
+        let [up, down] = two;
+        out.push((v, up, down, all));
+    }
+    Ok(out)
 }
 
 /// The bytes of one tile file: the nodes `first..first + k`, their search arcs and all their arcs (other node, cost,

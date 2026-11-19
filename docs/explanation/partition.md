@@ -5,13 +5,13 @@
     Measured on Monaco, Kentucky and France. On France the queries are about 10 times faster than with the XYZ tiles
     ([Results: France](#results-france)).
 
-This page describes the partition version: the same method as the [tile version](levels.md), but the cells come from
+This page describes the partition version: the same method as the [XYZ-tile cell version](levels.md), but the cells come from
 a partition of the road graph, not from the XYZ tiles. It is step D1 of
 [The whole world](distributed.md).
 
 ## The problem that it solves
 
-In the tile version, the cell of a node is an XYZ tile, so the borders between cells are straight lines. A set (the
+In the XYZ-tile cell version, the cell of a node is an XYZ tile, so the borders between cells are straight lines. A set (the
 nodes of one level in one cell) holds every road that crosses the lines of its cell. All nodes of a set have the same
 rank, so the search goes through a set as a plain Dijkstra does.
 
@@ -33,7 +33,7 @@ With these two properties, two nodes of one level in different cells have no arc
 level are independent. A cell does not have to be a square. So the set steps, the witness search, the saved paths, the
 arc reduction and the query do not change. Only the function that gives the level and the cell of a node changes.
 
-| | Tile version | Partition version |
+| | XYZ-tile cells | Partition version |
 |---|---|---|
 | Cell | an XYZ tile | a part of the road graph |
 | Border | straight lines (longitude, Mercator latitude) | the cut with the fewest roads that the partition finds |
@@ -45,6 +45,43 @@ arc reduction and the query do not change. Only the function that gives the leve
 
 The cell key has the same form as a tile key, so the functions `parent` and `lca_zoom` of
 [src/tile.rs](https://github.com/Khoshkhah/tileroute/blob/main/src/tile.rs) work unchanged for both versions.
+
+## The three versions
+
+Two choices make a version: the **order** (where the cells of the hierarchy come from) and the **files** (how the
+nodes are grouped on disk). The query reads all three versions with the same code.
+
+| Version | Order: the cells | Files | Build command |
+|---|---|---|---|
+| **1. XYZ-tile cells** (the default) | XYZ tiles, straight borders | one file for each zoom-8 XYZ tile (`8_x_y.trt`) and the top (levels 0 to 7) | `build --by-tile` |
+| **2. Partition cells, cell files** | the partition of the road graph | one file for each partition cell of level 3 (`3_x_y.trt`, a cell key, not a map tile) and the top (levels 0 to 2) | `build --by-tile --partition 16` |
+| **3. Partition cells, XYZ tile files** | the partition of the road graph | one file for each zoom-8 XYZ tile (`8_x_y.trt`), the same tiles as duckOSM and PMTiles, and the top (levels 0 to 2) | `build --by-tile --partition 16 --xyz-files` |
+
+**Kentucky, the same WSL PC, the same 10,000 pairs, one thread, from the files:**
+
+| | 1. XYZ-tile cells | 2. Partition cells, cell files | 3. Partition cells, XYZ tile files |
+|---|---|---|---|
+| Build tile by tile | 31.6 s | 16.1 s | 15.7 s |
+| Peak memory of the build | 1.6 GB | 0.9 GB | 0.9 GB |
+| Top nodes | 3,340 | 1,426 | 1,426 |
+| Files | 18 + top, 706 MB | 64 + top, 419 MB | 18 + top, 419 MB |
+| One query | 1.25 ms | 0.169 ms | **0.165 ms** |
+| Files read for each query | 3.7 | 7.8 | **4.6** |
+| Bytes read for each query | 3.0 MB | 192 KB | 192 KB |
+| Routes from the files = routes in memory | 2,000 of 2,000 | 2,000 of 2,000 | 2,000 of 2,000 |
+
+**What makes the difference:**
+
+- **The order decides the speed.** Versions 2 and 3 have the same order, so they read the same bytes and take the same
+  time. Version 1 has the straight tile borders, so its top is dense: 7 times slower on Kentucky, 10 times on France.
+- **The files decide only how many files a query opens.** Zoom-8 tiles are larger than the level-3 cells of Kentucky,
+  so version 3 opens fewer files than version 2.
+- **Version 3 keeps the project's tiling** for the files: a file has a standard z/x/y name, as in duckOSM, pbfcut and
+  PMTiles. A file is valid only with the other files of the same build, because a shortcut depends on the partition
+  cell where it was made, and a cell can cross a tile border.
+
+**France** (Mac mini): version 1: 5.32 ms warm, 10.3 ms cold; version 2: 0.54 ms warm, 1.35 ms cold
+([Results: France](#results-france)). Version 3 is not measured on France yet; on Kentucky it is equal to version 2.
 
 ## The partition: inertial flow
 
@@ -89,9 +126,10 @@ routes from the XYZ files are equal to the routes in memory (2,000 of 2,000).
 A tile file is valid only together with the other files of the same build: a shortcut depends on the partition cell
 where it was made, and a cell can cross a tile border.
 
-Today `--xyz-files` works with the build in memory. `build --by-tile --partition 16` writes files by partition cell (64
-files of level 3; the format is the same, [Tile files](../reference/tile-files.md)), because it builds one cell at a
-time.
+`--xyz-files` works with the build in memory and with `build --by-tile`. The build tile by tile still runs the steps
+one partition cell (of level 3) at a time; after the arc reduction of a cell, the arcs of each node go to a temporary
+bucket of its XYZ tile, and then each XYZ tile file is written from its bucket. The format of the files is the same
+([Tile files](../reference/tile-files.md)).
 
 ## Results: Kentucky
 
@@ -100,7 +138,7 @@ from the files are equal to the routes in memory (2,000 of 2,000).
 
 **The same computer (WSL PC), the same 2,000 pairs, one thread:**
 
-| | Tile version | Partition version (leaf 16) |
+| | 1. XYZ-tile cells | 2. Partition cells (leaf 16) |
 |---|---|---|
 | Nodes of the coarsest level | 973 (zoom 5) | 120 (level 0) |
 | Largest forward-search degree of a node | 238 | 39 |
@@ -120,9 +158,9 @@ from the files are equal to the routes in memory (2,000 of 2,000).
 ## Results: France
 
 Mac mini (16 GB), 2026-11-19, `bench/francebench.sh` with `TRARGS="--partition 16"`. The same `.osm.pbf` and the same
-2,000 pairs as the tile version ([Comparison with other routers](engines.md#measured-on-france)). One thread.
+2,000 pairs as the XYZ-tile cell version ([Comparison with other routers](engines.md#measured-on-france)). One thread.
 
-| | Tile version | Partition version |
+| | 1. XYZ-tile cells | 2. Partition cells, cell files |
 |---|---|---|
 | Top nodes | 28,192 (level 7 and coarser) | 4,184 (level 2 and coarser) |
 | `build --by-tile`, in all | 547 s | 545 s |
@@ -144,7 +182,7 @@ On the same Mac, OSRM CH needs 1.15 / 1.48 ms (warm / cold) and GraphHopper CH (
 on all 11 million junctions, and only the 4 lines of a cut run in parallel there. The steps themselves take 32 s.
 
 Not checked for France: the routes against duckOSM's router (the check needs all of France in memory), and the costs
-pair by pair against the tile version. Monaco and Kentucky are checked (0 wrong).
+pair by pair against the XYZ-tile cell version. Monaco and Kentucky are checked (0 wrong).
 
 ## What the tiles still do
 
@@ -170,7 +208,7 @@ its tile. The keys stay nested, so the method does not change.
 
 In [The whole world](distributed.md), a **region** is a cell of a coarse level of this partition (for example 20 to
 50 million road edges), and the **overlay** is all nodes of the region level and coarser. The partition is used at all
-coarse levels, also inside a region: the slow part of the tile version is inside one region (France alone: 5.3 ms for
+coarse levels, also inside a region: the slow part of the XYZ-tile cell version is inside one region (France alone: 5.3 ms for
 each query, 28,192 top nodes), and Kentucky, which is smaller than one region, got 7.8 times faster only from the cuts
 inside it.
 
@@ -212,7 +250,7 @@ builds on the cells, and in how the query uses them.
 
 ## Advantages and disadvantages
 
-| | Tile version | Partition version |
+| | XYZ-tile cells | Partition version |
 |---|---|---|
 | Query speed and arcs | slower; the top grows with the area | faster; the cuts stay small |
 | Preparation | no partition | the partition first (Kentucky: 7 s); the steps are faster |

@@ -275,10 +275,11 @@ fn build(args: &[String]) -> Result<(), String> {
         // --partition LEAF: the cells from the partition; then the files are cells of zoom --top + 1 (default 3)
         let leaf: Option<usize> = arg(args, "--partition").map(|s| s.parse()).transpose().map_err(|e| format!("--partition: {e}"))?;
         let top: u8 = arg(args, "--top").map_or(Ok(if leaf.is_some() { 2 } else { disk::TOP }), |s| s.parse()).map_err(|e| format!("--top: {e}"))?;
-        let r = tileroute::bytile::build(db.as_ref(), mode, finest, top, leaf, dir.as_ref())?;
+        let xyz = args.iter().any(|a| a == "--xyz-files");
+        let r = tileroute::bytile::build(db.as_ref(), mode, finest, top, leaf, xyz, dir.as_ref())?;
         println!(
             "built tile by tile: {} nodes ({} in the top), {} arcs, {} files of zoom {}, {:.1} MB",
-            r.nodes, r.top_nodes, r.arcs, r.tiles, top + 1, r.bytes as f64 / 1e6
+            r.nodes, r.top_nodes, r.arcs, r.tiles, if xyz { 8 } else { top + 1 }, r.bytes as f64 / 1e6
         );
         for (what, secs) in &r.times {
             println!("  {what}: {secs:.2} s");

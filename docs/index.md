@@ -1,7 +1,7 @@
 # tileroute
 
 tileroute finds the shortest path on a road network from duckOSM. It adds **shortcuts** to the graph and orders
-them by **cells**: XYZ map tiles (the tile version), or parts of the road graph with few roads across their borders
+them by **cells**: XYZ map tiles (the XYZ-tile cell version), or parts of the road graph with few roads across their borders
 (the [partition version](explanation/partition.md)). The files can be the same XYZ tiles as duckOSM's builds, pbfcut
 and the map tiles. The goal: a query reads only the files that it needs, so that a country does not need all of its
 graph in memory, also in the browser.
@@ -10,7 +10,7 @@ graph in memory, also in the browser.
     The shortcuts and the query work in memory and from [tile files](reference/tile-files.md) on disk. Each route
     is equal to the route of duckOSM's router (Monaco: all 7.6 million pairs; Kentucky and four Vancouver areas:
     10,000 random pairs each). The [partition version](explanation/partition.md) (`--partition 16`) answers a France
-    query in 0.54 ms from the files on a Mac mini (the tile version: 5.32 ms). The browser version, the weights, the
+    query in 0.54 ms from the files on a Mac mini (the XYZ-tile cell version: 5.32 ms). The browser version, the weights, the
     combined modes, the timetable and the distributed version are designed ([Plan](plan.md)), not made yet.
 
 ## Start

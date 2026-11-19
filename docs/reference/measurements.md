@@ -50,7 +50,7 @@ run in memory; the tile files are not made yet ([Plan](../plan.md)).
 ## The partition version (2026-11-19)
 
 `--partition 16`: the cells from the road graph ([Cells from the graph](../explanation/partition.md)). The tables above
-are the first tile version of 2026-11-18.
+are the first version (XYZ-tile cells) of 2026-11-18.
 
 | Area, computer | Build | Peak memory | Files | One query (one thread) | Read for each query |
 |---|---|---|---|---|---|
