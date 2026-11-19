@@ -61,12 +61,12 @@ one thread; "cold" is the first pass after the start, "warm" the second.
 | GraphHopper CH 11.1 (no turn costs) | import 211 s | 8.8 GB | 1.7 GB | **0.89** / 1.17 ms | 3.9 GB (Java) |
 | OSRM CH 26.11 | extract 677 s + contract 549 s | 11.9 GB | 8.4 GB | 1.15 / 1.48 ms | 5.6 GB |
 | OSRM MLD 26.11 | extract 672 s + partition 146 s + customize 20 s | 12.4 GB | 9.3 GB | 2.95 / 3.52 ms | 5.2 GB |
-| **tileroute, partition version** (from tile files) ² | duckOSM 361 s + slim 4 s + `build --by-tile --partition 16` 545 s | 8.4 GB | 4.7 GB | **0.54** / 1.35 ms | 2.1 GB ¹ |
-| tileroute, tile version (from tile files) | duckOSM 372 s + slim 5 s + `build --by-tile` 547 s | 9.5 GB | 8.1 GB | 5.32 / 10.3 ms | 4.0 GB ¹ |
+| **tileroute, partition cells** (from tile files) ² | duckOSM 361 s + slim 4 s + `build --by-tile --partition 16` 545 s | 8.4 GB | 4.7 GB | **0.54** / 1.35 ms | 2.1 GB ¹ |
+| tileroute, XYZ-tile cells (from tile files) | duckOSM 372 s + slim 5 s + `build --by-tile` 547 s | 9.5 GB | 8.1 GB | 5.32 / 10.3 ms | 4.0 GB ¹ |
 | duckOSM's router today | load 11 to 16 s | — | — | 3.7 s (Paris to Marseille) | 6.4 GB |
 
 ¹ The peak of the query process: almost all of it is pages of the mapped tile files. A query reads on average 7.0
-files and 1.5 MB (partition version), or 7.2 files and 31 MB (tile version).
+files and 1.5 MB (partition version), or 7.2 files and 31 MB (XYZ-tile cell version).
 
 ² The same Mac, the same `.osm.pbf` and the same 2,000 pairs (`--pairs-file`), measured later on 2026-11-19. The
 cells come from the inertial flow partition ([Cells from the graph](partition.md)). Both versions find a route for
@@ -92,14 +92,18 @@ cannot match edge by edge; tileroute's routes equal duckOSM's router where that 
 
 GraphHopper found no route for 17 pairs (16 of them have a route in tileroute): it did not find a road near the point.
 
-**What this shows:** with the tile version, tileroute's queries are 4.6 times slower than OSRM CH, because of the top
+**What this shows:** with the XYZ-tile cell version, tileroute's queries are 4.6 times slower than OSRM CH, because of the top
 of the hierarchy (28,192 nodes, a 794 MB top file). With the partition version, the top has 4,184 nodes and the
 queries are about 10 times faster: 0.54 ms warm, faster than GraphHopper CH (0.89 ms) and OSRM CH (1.15 ms) on this Mac;
 1.35 ms cold, near GraphHopper (1.17 ms) and OSRM CH (1.48 ms). The preparation needs less memory than all others
 except GraphHopper (8.4 GB), and about 15 minutes with duckOSM's build. Note: GraphHopper here has no turn costs,
 tileroute and OSRM have them.
 
-## Why tileroute is slower and larger today
+## Why the XYZ-tile cell version is slower and larger
+
+!!! note
+    This section measures the XYZ-tile cell version. The [partition version](partition.md) removes its main cause, the dense
+    top: France 0.54 ms for each query, faster than OSRM CH on the same Mac ([Measured on France](#measured-on-france)).
 
 Where the time of one tileroute query goes (Kentucky, the same pairs, one thread, `tileroute check --profile`):
 
@@ -181,7 +185,8 @@ These fixes are milestone M2c of the [Plan](../plan.md).
 
 | Weak point | Reason | Possible fix |
 |---|---|---|
-| Queries slower than OSRM CH and GraphHopper CH (Mac mini: 0.66 ms in memory, 0.81 ms from the files, against 0.58 and 0.38 ms) | the dense top of the hierarchy (many arcs for each top node) | done: saved paths, memory layout, witness search, arc reduction; tileroute is now near OSRM CH and faster than OSRM MLD |
-| More shortcuts than a graph partitioner would make | tile borders do not follow the roads | accepted for one tiling protocol |
-| A query reads 3.0 MB of tile files on average (Kentucky, with arc reduction; 8.8 MB before) | the arcs of the low levels are large, and each arc is stored three times | a smaller arc, one arc list ([Tile files](../reference/tile-files.md#next-steps)) |
+| XYZ-tile cells: queries slower than OSRM CH on large areas (France: 5.32 ms against 1.15 ms) | the dense top of the hierarchy: tile borders do not follow the roads | **done**: the [partition version](partition.md), France 0.54 ms (warm) and 1.35 ms (cold) |
+| Partition version: the partition is the slow part of the build (France: 478 s of 545 s) | the first cuts are large maximum-flow problems, with little parallel work | the first cuts in parallel, or a coarse graph first |
+| The structure depends on the costs (the witness search) | new costs run the steps again; time-dependent costs and per-query weights need a structure with no costs | a rank for each node of a set, no witness search, and a customization step, as CCH ([Comparison with CCH and MLD](partition.md#comparison-with-cch-and-mld)) |
+| A query reads 3.0 MB of tile files on average (Kentucky, XYZ-tile cells; 194 KB with partition cells) | the arcs of the low levels are large, and each arc is stored three times | a smaller arc, one arc list ([Tile files](../reference/tile-files.md#next-steps)) |
 | Not a full product | no snapping of points to roads, no turn instructions, no server, no browser yet | later milestones |

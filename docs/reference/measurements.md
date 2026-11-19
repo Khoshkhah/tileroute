@@ -47,6 +47,23 @@ A tie is another path with exactly the same cost ([The shortest path](../explana
 The duckOSM router times come from runs with 20 threads, so they are a little higher than on one thread. These queries
 run in memory; the tile files are not made yet ([Plan](../plan.md)).
 
+## The partition version (2026-11-19)
+
+`--partition 16`: the cells from the road graph ([Cells from the graph](../explanation/partition.md)). The tables above
+are the first version (XYZ-tile cells) of 2026-11-18.
+
+| Area, computer | Build | Peak memory | Files | One query (one thread) | Read for each query |
+|---|---|---|---|---|---|
+| Kentucky, WSL PC, in memory | partition 7.1 s + steps 4.2 s | 2.3 GB (with 2,000 queries) | — | 0.23 ms | — |
+| Kentucky, WSL PC, `build --by-tile` | 14.5 s | 0.9 GB | 438 MB | 0.17 ms | 7.8 files, 194 KB |
+| France, Mac mini, `build --by-tile` | 545 s (partition 478 s) | 8.4 GB | 4.7 GB | 0.54 ms warm, 1.35 ms cold | 7.0 files, 1.5 MB |
+
+| Area | Pairs | Same path | Tie | No path | Wrong |
+|---|---|---|---|---|---|
+| Monaco | 7,645,225 (all) | 7,223,187 | 0 | 422,038 | 0 |
+| Kentucky | 300 | 293 | 0 | 7 | 0 |
+| Kentucky, the files against memory | 2,000 | 2,000 | 0 | — | 0 |
+
 ## The time of each step, Metro Vancouver (one thread)
 
 | Zoom | Sets | All steps | Largest step |
