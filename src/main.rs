@@ -308,13 +308,29 @@ fn proc_memory() -> String {
 
 /// `tileroute route <folder> --pairs-file CSV [--cache 64]`: a process that only reads the tile files.
 fn route_files(args: &[String]) -> Result<(), String> {
-    let usage = "usage: tileroute route <folder> --pairs-file CSV [--cache 64]";
-    let (Some(dir), Some(path)) = (args.get(1), arg(args, "--pairs-file")) else { return Err(usage.into()) };
+    let usage = "usage: tileroute route <folder> (--pairs-file CSV | --random N) [--cache 64]";
+    let Some(dir) = args.get(1) else { return Err(usage.into()) };
     let cache: usize = arg(args, "--cache").map_or(Ok(64), |s| s.parse()).map_err(|e| format!("--cache: {e}"))?;
     let store = disk::Store::open(dir.as_ref(), cache).map_err(|e| e.to_string())?;
-    // a CSV with the duckOSM edge ids of the start and the target in its first two columns, and a header line
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let pairs: Vec<(i64, i64)> = text
+    let pairs: Vec<(i64, i64)> = if let Some(k) = arg(args, "--random") {
+        // N random pairs of edge ids from edges.idx (a fixed sequence), for an area with no pairs file
+        let k: usize = k.parse().map_err(|e| format!("--random: {e}"))?;
+        let b = std::fs::read(std::path::Path::new(dir).join("edges.idx")).map_err(|e| e.to_string())?;
+        let n = u64::from_le_bytes(b[8..16].try_into().expect("8 bytes")) as usize;
+        let id = |i: usize| i64::from_le_bytes(b[16 + 8 * i..24 + 8 * i].try_into().expect("8 bytes"));
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        (0..k).map(|_| (id(next()), id(next()))).collect()
+    } else {
+        let Some(path) = arg(args, "--pairs-file") else { return Err(usage.into()) };
+        // a CSV with the duckOSM edge ids of the start and the target in its first two columns, and a header line
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        text
         .lines()
         .skip(1)
         .filter(|l| !l.is_empty())
@@ -325,7 +341,8 @@ fn route_files(args: &[String]) -> Result<(), String> {
                 _ => Err(format!("{path}: not two edge ids: {l}")),
             }
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()?
+    };
     println!("opened {dir}: {} tile files; process {:.1} MB peak", store.n_files(), disk::peak_rss() as f64 / 1e6);
     // two passes on one thread: the first maps the files, the second finds them in the cache of the operating system
     for pass in ["first", "second"] {
