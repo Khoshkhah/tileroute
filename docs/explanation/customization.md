@@ -25,8 +25,24 @@ A customizable contraction hierarchy (CCH) splits the work in two parts. tilerou
 |---|---|---|---|
 | **1. Order** | the cells: the finest level first; in a level by cell; in a cell by node number | when the network changes | — |
 | **2. Structure** | the graph and the order, **no costs** | when the network changes | 0.7 s, 18.5 million edges |
-| **3. Customization** | the costs of one metric | for each new set of costs | 1.5 s (one thread) + 0.7 s arc reduction |
-| **4. Query** | the structure and the costs of one metric | for each route | 0.26 ms |
+| **3. Customization** | the costs of one metric | for each new set of costs | 1.5 s (one thread) + 0.8 s arc reduction |
+| **4. Query** | the structure and the costs of one metric | for each route | 0.38 ms |
+
+## One network for all costs
+
+The structure (which nodes, which edges) is made once and **all costs share it**. A type of cost (time, length, a
+truck profile, the travel time of one hour) adds only numbers on the same edges. 5 types of cost are 1 structure and 5
+sets of numbers, not 5 networks.
+
+| Part | Shared by all costs | For each edge | Kentucky |
+|---|---|---|---|
+| Structure: the higher neighbours of each node | yes | one node number | 100 MB |
+| Costs | no, one set for each cost | the cost a → b and the cost b → a | 296 MB (f64), 148 MB with f32 |
+| Middle node (for the unpack) | no: the best path changes with the cost | one node for each direction | 148 MB; optional (the unpack can find it from the triangles) |
+| Mask of the arc reduction | no | one bit for each direction: does the search use this edge for this cost? | 4.6 MB |
+
+The arc reduction does not make a new network: it only sets the bits of the mask. The query reads the shared
+structure and skips each edge whose bit is 0.
 
 **1. Order.** Each node gets its own rank. With the [partition cells](partition.md) this is a nested-dissection order:
 the nodes of a cut get a rank above all nodes of the two parts that the cut separates. This is the difference from the
@@ -62,22 +78,24 @@ WSL PC, the same 2,000 pairs, one thread, in memory, `check --partition 16 --cch
 | | Hierarchy with the witness search (today) | Structure with no costs, then customization |
 |---|---|---|
 | Made once for the network | — | order and structure: 0.7 s |
-| For each new set of costs | all steps: 4.1 s | **customization: 2.2 s** (triangles 1.5 s on one thread, arc reduction 0.7 s) |
+| For each new set of costs | all steps: 4.1 s | **customization: 2.3 s** (triangles 1.5 s on one thread, arc reduction and mask 0.8 s) |
 | Edges | 7.2 million arcs | 18.5 million edges (each with two costs) |
-| Search arcs | — | 18.7 million, 16.7 million after the arc reduction |
+| Search arcs | — | 18.7 million, 16.7 million after the arc reduction (as bits of a mask) |
+| Memory for each cost | — (one hierarchy for each cost: 447 MB of query data) | 448 MB (f64 costs, middle nodes, mask); smaller forms in the table above |
 | Nodes settled by one query | 680 | 572 |
 | Arcs opened by one query | 8,789 | 15,644 (30,425 with no arc reduction) |
-| One query | **0.21 ms** | 0.26 ms (0.38 ms with no arc reduction) |
+| One query | **0.21 ms** | 0.38 ms with the mask (0.46 ms with no arc reduction) |
 | Routes | — | 2,000 of 2,000 the same as the hierarchy (Monaco: 20,000 of 20,000) |
 
 **What this shows:**
 
-- **New costs are faster** (2.2 s against 4.1 s), and the triangles still run on one thread. In parallel (the nodes
+- **New costs are faster** (2.3 s against 4.1 s), and the triangles still run on one thread. In parallel (the nodes
   of one depth of the elimination tree at the same time), the customization can take less than 1 s.
 - **The structure does not depend on the costs**, so travel-time tables, weights for each query and many metrics can
   use one structure: each needs only its own costs (two numbers for each edge).
-- **The price:** 2.6 times more edges, and queries about 25% slower (0.26 against 0.21 ms), because there is no
-  witness search. The arc reduction gives back most of the query time.
+- **The price:** 2.6 times more edges, and queries slower (0.38 against 0.21 ms), because there is no witness
+  search and the query reads the shared structure with a mask. A separate copy of the needed arcs for each cost
+  gave 0.26 ms, but it costs 268 MB for each cost on Kentucky; the mask costs 4.6 MB.
 
 ## Earlier: the triangle version with XYZ-tile cells
 
@@ -90,6 +108,7 @@ fewer edges (2.6 times), and the full customization is faster than the steps.
 | Step | Done means |
 |---|---|
 | The customization in parallel, by depth of the elimination tree | Kentucky: the customization below 1 s |
+| A faster query on the shared structure: the costs of one direction next to the node numbers, f32 costs | Kentucky: near 0.26 ms with the mask |
 | The structure and the costs in the tile files (the costs as a separate file of numbers for each metric) | a new set of costs writes only the cost file; the routes from the files are equal to memory |
 | Travel-time tables: one cost file for each hour on one structure | [Predicted traffic](predicted-traffic.md) with one structure |
 | France on the Mac mini | customization time, edges, query time next to the hierarchy |

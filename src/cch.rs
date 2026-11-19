@@ -68,6 +68,11 @@ impl Cch {
         self.up.len()
     }
 
+    /// The bytes of the structure: the higher neighbours, their offsets and the order.
+    pub fn bytes(&self) -> usize {
+        4 * (self.up.len() + self.off.len() + 2 * self.order.len())
+    }
+
     fn row(&self, r: u32) -> std::ops::Range<usize> {
         self.off[r as usize] as usize..self.off[r as usize + 1] as usize
     }
@@ -145,8 +150,21 @@ impl Cch {
         let before = fwd.arc.len() + bwd.arc.len();
         let t_tri = t0.elapsed().as_secs_f64();
         let (fwd, bwd) = if reduce_arcs { (reduce(fwd), reduce(bwd)) } else { (fwd, bwd) };
+        // the mask of each direction: one bit for each edge, set when the search uses it (the structure stays shared)
+        let mask = |g: &Fast| -> Vec<u64> {
+            let mut bits = vec![0u64; m.div_ceil(64)];
+            for a in 0..n as u32 {
+                for &(_, b) in g.of(a) {
+                    let e = self.edge(a, b).expect("a search arc is an edge");
+                    bits[e / 64] |= 1 << (e % 64);
+                }
+            }
+            bits
+        };
+        let keep = [mask(&fwd), mask(&bwd)];
+        let kept = fwd.arc.len() + bwd.arc.len();
         let times = (t_tri, t0.elapsed().as_secs_f64() - t_tri);
-        Metric { cch: self, up, down, via_up, via_down, fwd, bwd, before, times }
+        Metric { cch: self, up, down, via_up, via_down, keep, before, kept, times }
     }
 
     pub fn max_depth(&self) -> u32 {
@@ -161,10 +179,11 @@ pub struct Metric<'a> {
     down: Vec<f64>,
     via_up: Vec<u32>,
     via_down: Vec<u32>,
-    fwd: Fast,
-    bwd: Fast,
-    /// the search arcs before the arc reduction
+    /// for the forward and the backward search: one bit for each edge, set when the search uses it
+    keep: [Vec<u64>; 2],
+    /// the search arcs before and after the arc reduction
     pub before: usize,
+    pub kept: usize,
     /// seconds: the triangles, the arc reduction
     pub times: (f64, f64),
 }
@@ -193,7 +212,12 @@ pub struct Stats {
 impl Metric<'_> {
     /// The search arcs after the reduction (forward + backward).
     pub fn n_search_arcs(&self) -> usize {
-        self.fwd.arc.len() + self.bwd.arc.len()
+        self.kept
+    }
+
+    /// The bytes of this metric: two costs, two middle nodes and two mask bits for each edge.
+    pub fn bytes(&self) -> usize {
+        self.up.len() * (8 + 8 + 4 + 4) + 2 * 8 * self.keep[0].len()
     }
 
     /// The shortest path from input node `s` to `t`: its cost and its input nodes.
@@ -229,8 +253,12 @@ impl Metric<'_> {
                     meet = v;
                 }
             }
-            let g = if dir == 0 { &self.fwd } else { &self.bwd };
-            for &(cost, w) in g.of(v) {
+            let (cost_of, keep) = (if dir == 0 { &self.up } else { &self.down }, &self.keep[dir]);
+            for e in c.row(v) {
+                if keep[e / 64] >> (e % 64) & 1 == 0 {
+                    continue;
+                }
+                let (cost, w) = (cost_of[e], c.up[e]);
                 st.relaxed += 1;
                 let nd = d + cost;
                 if label[dir].get(&w).is_none_or(|&(e, _)| nd < e) {

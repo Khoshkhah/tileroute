@@ -21,7 +21,7 @@ tile, natively and in the browser.
 | Question | Decision | Why |
 |---|---|---|
 | The method | Shortcuts by tile, bottom-up only | exact, fast preparation, one structure for all costs |
-| New costs (traffic) | Rebuild all costs on a schedule; next: a structure with no costs and a customization ([page](explanation/customization.md)) | Kentucky: customization 2.2 s against 4.1 s for all steps, and one structure for many costs |
+| New costs (traffic) | Rebuild all costs on a schedule; next: a structure with no costs and a customization ([page](explanation/customization.md)) | Kentucky: customization 2.3 s against 4.1 s for all steps, and one structure for many costs |
 | Per-query weights | Option B: each shortcut keeps the corners of the hull of its vectors | exact for any weights ≥ 0; no preparation for each query |
 | Combined modes | One graph with change arcs; a rule becomes a copy of the graph for each state | the hierarchy works unchanged |
 | Timetable | RAPTOR (McRAPTOR for weights), joined to the walking hierarchy at the stops | a timetable does not fit fixed-cost shortcuts |
@@ -70,7 +70,7 @@ So the shortcuts do not hold time functions; they only make the exact time-depen
 | **M7b Predicted traffic** | Slices from SonoFlow's prediction (flow to time, FIFO), one rebuild for each slice, the query by departure time; then the search that changes slices along the route | for each slice, 0 wrong routes against duckOSM's router with that slice; along the route, equal to a plain time-dependent Dijkstra |
 | **D1 Cells from the graph** (done: Kentucky 1.79 → 0.23 ms; France 5.32 → 0.54 ms) | An inertial flow partition gives the cells ([page](explanation/partition.md)) | France measured on the Mac mini next to the XYZ-tile cell version |
 | **D2 to D5 The whole world** | Regions and the overlay, servers, Europe, a load test ([page](explanation/distributed.md)) | France below 2 ms for each query with small sets; then the steps on that page |
-| **C1 A structure with no costs** (in memory done: Kentucky 2.2 s for new costs, 0.26 ms for each query) | Order with a rank for each node, structure with no witness search, customization ([page](explanation/customization.md)) | parallel customization; the structure and the costs in the tile files; France measured |
+| **C1 A structure with no costs** (in memory done: Kentucky 2.3 s for new costs, 0.38 ms for each query, one shared structure with a mask for each cost) | Order with a rank for each node, structure with no witness search, customization ([page](explanation/customization.md)) | parallel customization; the structure and the costs in the tile files; France measured |
 | **M8 Browser** | WebAssembly package, archive read with HTTP range reads or from browser storage, a demo page | the browser gives the same routes as native, for driving, walking and a timetable trip |
 
 M5, M6, M7 and M7b need M3 and M4 (the tile files), because their data is also stored by tile. M5 and M6 can run in parallel.

@@ -453,14 +453,16 @@ fn cch_check(net: &load::Network, pairs: &[(u32, u32)], ours: &[Option<(f64, Vec
     let t_struct = t.elapsed().as_secs_f64();
     let m = c.customize(&net.turns, !std::env::args().any(|a| a == "--no-reduce"));
     println!(
-        "cch: structure {:.2} s ({} edges, elimination tree depth {}); customization: triangles {:.2} s, arc reduction {:.2} s ({} -> {} search arcs)",
+        "cch: structure {:.2} s ({} edges, elimination tree depth {}, {:.0} MB); customization: triangles {:.2} s, arc reduction and mask {:.2} s ({} -> {} search arcs, {:.0} MB for this metric)",
         t_struct,
         c.n_edges(),
         c.max_depth(),
+        c.bytes() as f64 / 1e6,
         m.times.0,
         m.times.1,
         m.before,
-        m.n_search_arcs()
+        m.n_search_arcs(),
+        m.bytes() as f64 / 1e6
     );
     let weight: std::collections::HashMap<(u32, u32), f64> = net.turns.iter().map(|a| ((a.0, a.1), a.2)).collect();
     let (mut same, mut tie, mut wrong) = (0usize, 0usize, 0usize);

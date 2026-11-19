@@ -2,7 +2,7 @@
 
 !!! tip "Next"
     With the partition cells, a structure with no costs and a full customization is faster than all steps: Kentucky
-    2.2 s against 4.1 s ([A structure with no costs](customization.md)).
+    2.3 s against 4.1 s ([A structure with no costs](customization.md)).
 
 Traffic changes the travel time of road edges, but the network stays the same. This page says how tileroute updates
 its shortcuts after such a change, and how fast.
