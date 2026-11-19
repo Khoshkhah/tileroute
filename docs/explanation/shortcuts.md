@@ -114,6 +114,22 @@ The top nodes are already joined by many shortcuts from the finer tile steps, so
 shortcuts again. The routes stay exact (Monaco: all pairs), but the gain is small and the preparation is much longer.
 So the tile order stays for all levels.
 
+## Arc reduction: fewer arcs for the search
+
+After the steps, many arcs of the two search graphs (forward and backward) are not needed: another path in the same
+search graph costs the same or less, for example u → x → w in place of the shortcut u → w. A small Dijkstra from each
+node (in parallel, at most 2,000 settled nodes) finds these arcs and removes them **from the search graphs only**; the
+unpack data keeps every arc. A search then uses the other path, so the routes stay exact.
+
+| Kentucky | Before | With arc reduction |
+|---|---|---|
+| Arcs that a query opens | 543,097 | **180,380** |
+| One query (one thread, WSL PC) | 2.35 ms | **1.09 ms** |
+| Query data | 802 MB | 747 MB |
+| Preparation | 21 s | 34 s |
+
+A larger limit (20,000 settled nodes) removes no more arcs.
+
 ## Why the tiles of one zoom run in parallel
 
 Two sets X of the same zoom have no common node and no arc between them: their road edges are in different tiles and

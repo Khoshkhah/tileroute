@@ -69,7 +69,8 @@ thread, the same algorithm and the same arcs):
 | Node numbers in the order of the database rows | 7.3 ms |
 | Node numbers by level, the top first (the nodes that a query reads most are together) | 4.0 ms |
 | + the search arcs as one array of (cost, node) | 3.2 ms |
-| + no stall-on-demand (its extra reads cost more than they save) | **2.35 ms** |
+| + no stall-on-demand (its extra reads cost more than they save) | 2.35 ms |
+| + arc reduction (remove search arcs that another path makes not needed: 543,097 → 180,380 arcs opened) | **1.09 ms** |
 
 The query data in memory went down to 802 MB.
 
