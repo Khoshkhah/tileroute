@@ -130,6 +130,42 @@ coarse levels, also inside a region: the slow part of the tile version is inside
 each query, 28,192 top nodes), and Kentucky, which is smaller than one region, got 7.8 times faster only from the cuts
 inside it.
 
+## Comparison with CCH and MLD
+
+All three use nested cells with small cuts. OSRM MLD also uses inertial flow. The differences are in what each one
+builds on the cells, and in how the query uses them.
+
+| Point | CCH (customizable contraction hierarchy) | MLD (OSRM MLD, CRP) | tileroute, partition version |
+|---|---|---|---|
+| Graph | node-based (turns need an extra step) | node-based, with turn tables at the junctions | edge-based: a node is a road edge, so a turn is a normal arc |
+| Cuts | node separators (junctions) | edge cuts (cut roads) | edge cuts of the junctions; the cut roads are the nodes of a set |
+| Levels | deep: one level for each cut | few: about 4 to 5 levels of cells | deep: about 13 levels with 4 children (two cuts) each |
+| Order inside a separator | each node has its own rank (a total order) | no order: the border nodes of a cell make a clique | all nodes of one set have the same rank and are removed together |
+| How the shortcuts are made | one node at a time, with no witness search | a clique between all border nodes of each cell | one Dijkstra through the whole set, with a witness search |
+| Depends on the costs | no: the structure is fixed; the costs come later in a separate customization step | no: the cliques get their costs in the customization | yes: the witness search uses the costs |
+| New costs (traffic) | customization: some seconds for Europe | customization: some seconds for each level | the steps run again (Kentucky: 4 s; France not measured) |
+| Arcs that are not needed | removed by the perfect customization | stay (full cliques) | removed by the witness search and the arc reduction |
+| Query | elimination-tree search (no priority queue), or bidirectional Dijkstra up only | bidirectional Dijkstra that changes level by the cells of the start and the end | bidirectional Dijkstra up only, as in a CH |
+| Unpack of the path | from the triangles of the shortcuts | a search in each cell again, or stored paths | the saved inner nodes of each shortcut |
+
+**The main differences:**
+
+1. **Sets, not single nodes.** tileroute removes a whole set with one Dijkstra. CCH removes one separator node at a
+   time. The steps of tileroute are simple and run in parallel, but the search moves freely inside a set. This is not
+   a problem when the sets are small.
+2. **The costs are in the structure.** CCH and MLD make the structure once with no costs, then add the costs fast
+   (customization). tileroute uses the costs in the witness search, so new costs run the steps again. This agrees with
+   the decision to rebuild all costs on a schedule ([Updates](updates.md)).
+3. **Edge-based graph.** In tileroute a turn cost is an arc. CCH and MLD need more work for turns.
+4. **Saved paths.** The unpack is fast, but the saved paths use memory.
+
+**What tileroute can take from them:**
+
+| From | Idea | Gain | Cost |
+|---|---|---|---|
+| CCH | No witness search: a structure that does not depend on the costs, then a fast customization for new costs | fast updates for traffic and for the weights of each query ([Weights](weights.md)); tileroute already keeps every shortcut pair, so it is near this | more arcs, so slower queries unless a perfect customization removes them |
+| MLD | Fewer and larger levels | a smaller overlay for [the whole world](distributed.md) | more work inside each cell for each query |
+
 ## Advantages and disadvantages
 
 | | Tile version | Partition version |
