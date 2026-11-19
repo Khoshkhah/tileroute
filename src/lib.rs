@@ -4,4 +4,5 @@ pub mod disk;
 pub mod bytile;
 pub mod hier;
 pub mod load;
+pub mod part;
 pub mod tile;

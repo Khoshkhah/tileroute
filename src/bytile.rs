@@ -1,4 +1,4 @@
-//! The preparation tile by tile (`tileroute build --by-tile`): it holds one zoom-8 tile at a time, not the whole
+//! The preparation tile by tile (`tileroute build --by-tile`): it holds one tile of zoom top + 1 (default 8) at a time, not the whole
 //! network. The files are the same as those of `Hierarchy::write_files` (see `docs/explanation/build-by-tile.md`).
 //!
 //! 1. The nodes: level, cell, file and final node number of each road edge.
@@ -7,7 +7,7 @@
 //! 4. The top (level 7 and coarser): its arcs and the top shortcuts of all tiles; the steps of zoom 7 to 1.
 //! 5. For each zoom-8 tile: arc reduction with the top, then its tile file; then the top file and the indexes.
 
-use crate::disk::{self, AArc, SArc, TOP};
+use crate::disk::{self, AArc, SArc};
 use crate::hier::{reduce, reduce_from, run_steps, Arc, Fast, Steps};
 use crate::{load, tile};
 use std::collections::HashMap;
@@ -134,9 +134,10 @@ fn read_bucket(path: &Path) -> io::Result<Vec<(u32, u32, f64)>> {
     Ok(rows.into_iter().filter(|r| !r.3.is_nan() && r.0 != r.1).map(|r| (r.0, r.1, r.3)).collect())
 }
 
-/// Build the tile files of `db` (mode `mode`) in `dir`, one zoom-8 tile at a time. The temporary files go to
-/// `dir/.build` and are removed at the end.
-pub fn build(db: &Path, mode: &str, finest: u8, dir: &Path) -> Result<Report, String> {
+/// Build the tile files of `db` (mode `mode`) in `dir`, one tile of zoom `tz + 1` at a time; the nodes of level `tz`
+/// and coarser are the top. `leaf`: the cells from the partition (`load::partition_levels`), not from the tiles. The
+/// temporary files go to `dir/.build` and are removed at the end.
+pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: Option<usize>, dir: &Path) -> Result<Report, String> {
     let mut times = Vec::new();
     let t = std::time::Instant::now();
     std::fs::create_dir_all(dir).map_err(err)?;
@@ -147,7 +148,12 @@ pub fn build(db: &Path, mode: &str, finest: u8, dir: &Path) -> Result<Report, St
 
     // 1. the nodes: the road edges, and the edges of the graph that are not in `edges` (level 0)
     let mut nodes: Vec<(i64, u8, u64)> = Vec::new();
-    load::edge_levels(&con, mode, finest, |id, z, c| nodes.push((id, z, c)))?;
+    match leaf {
+        Some(leaf) => {
+            load::partition_levels(&con, mode, finest, leaf, |id, z, c, _| nodes.push((id, z, c)))?;
+        }
+        None => load::edge_levels(&con, mode, finest, |id, z, c| nodes.push((id, z, c)))?,
+    }
     {
         let mut st = con
             .prepare(&format!(
@@ -162,7 +168,7 @@ pub fn build(db: &Path, mode: &str, finest: u8, dir: &Path) -> Result<Report, St
     }
     nodes.sort_unstable_by_key(|x| x.0);
     nodes.dedup_by_key(|x| x.0);
-    let key_of = |z: u8, c: u64| if z <= TOP { 0 } else { tile::parent(c, TOP + 1) };
+    let key_of = |z: u8, c: u64| if z <= tz { 0 } else { tile::parent(c, tz + 1) };
     // the final node numbers: by file (the top first), then by level, then by cell
     let mut order: Vec<u32> = (0..nodes.len() as u32).collect();
     order.sort_unstable_by_key(|&i| {
@@ -210,7 +216,7 @@ pub fn build(db: &Path, mode: &str, finest: u8, dir: &Path) -> Result<Report, St
             let (a, b): (i64, i64) = (r.get(0).map_err(err)?, r.get(1).map_err(err)?);
             let c: Option<f64> = r.get(2).map_err(err)?;
             let (Some(u), Some(w)) = (node_of(a), node_of(b)) else { continue };
-            let key = if level[u as usize] > TOP { key_of_node(u) } else { key_of_node(w) };
+            let key = if level[u as usize] > tz { key_of_node(u) } else { key_of_node(w) };
             let f = match writers.entry(key) {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::hash_map::Entry::Vacant(e) => e.insert(BufWriter::new(File::create(bucket(key)).map_err(err)?)),
@@ -249,7 +255,7 @@ pub fn build(db: &Path, mode: &str, finest: u8, dir: &Path) -> Result<Report, St
         let m = g.global.len();
         let mut alive = vec![true; m];
         let mut st = Steps::new(finest, false);
-        run_steps(&mut g.arcs, &mut g.inn, &mut alive, &g.level, &g.cell, (TOP + 1..=finest).rev(), &mut paths, &mut st);
+        run_steps(&mut g.arcs, &mut g.inn, &mut alive, &g.level, &g.cell, (tz + 1..=finest).rev(), &mut paths, &mut st);
         // paths hold local numbers: to global numbers
         let paths: Vec<u32> = paths.iter().map(|&x| g.global[x as usize]).collect();
         let mut out = BufWriter::new(File::create(result(key)).map_err(err)?);
@@ -257,7 +263,7 @@ pub fn build(db: &Path, mode: &str, finest: u8, dir: &Path) -> Result<Report, St
             for (&b, arc) in row {
                 let (u, w) = (g.global[a], g.global[b as usize]);
                 let path = paths[arc.start as usize..(arc.start + arc.len) as usize].to_vec();
-                if level[u as usize] > TOP || level[w as usize] > TOP {
+                if level[u as usize] > tz || level[w as usize] > tz {
                     write_row(&mut out, &Row { u, w, cost: arc.cost, path }).map_err(err)?;
                 } else if arc.len > 0 {
                     // a shortcut between two top nodes
@@ -272,7 +278,7 @@ pub fn build(db: &Path, mode: &str, finest: u8, dir: &Path) -> Result<Report, St
         }
         out.flush().map_err(err)?;
     }
-    times.push(("fine steps (zoom 20 to 8), tile by tile", t.elapsed().as_secs_f64()));
+    times.push(("fine steps (finest zoom to top + 1), tile by tile", t.elapsed().as_secs_f64()));
 
     // 4. the top: its arcs and the top shortcuts of all tiles; the steps of zoom 7 to 1
     let t = std::time::Instant::now();
@@ -292,8 +298,8 @@ pub fn build(db: &Path, mode: &str, finest: u8, dir: &Path) -> Result<Report, St
     drop(short);
     // the top numbers are 0..ntop in both spaces, and the paths hold global numbers: no mapping needed
     let mut alive = vec![true; ntop];
-    let mut st = Steps::new(TOP, false);
-    run_steps(&mut top.arcs, &mut top.inn, &mut alive, &top.level, &top.cell, (1..=TOP).rev(), &mut top_paths, &mut st);
+    let mut st = Steps::new(tz, false);
+    run_steps(&mut top.arcs, &mut top.inn, &mut alive, &top.level, &top.cell, (1..=tz).rev(), &mut top_paths, &mut st);
     // the search graphs of the top (a node of a lower level is higher; up: to the same or a higher node)
     let up_of = |u: u32, w: u32| level[w as usize] <= level[u as usize];
     let mut top_up: Vec<Vec<(f64, u32)>> = vec![Vec::new(); ntop];
@@ -309,7 +315,7 @@ pub fn build(db: &Path, mode: &str, finest: u8, dir: &Path) -> Result<Report, St
             }
         }
     }
-    times.push(("top steps (zoom 7 to 1)", t.elapsed().as_secs_f64()));
+    times.push(("top steps (top zoom to 1)", t.elapsed().as_secs_f64()));
 
     // 5. the files: each zoom-8 tile with arc reduction together with the top, then the top file
     let t = std::time::Instant::now();
