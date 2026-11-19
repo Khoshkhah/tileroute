@@ -30,6 +30,8 @@ fn run() -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("build") => return build(&args),
         Some("route") => return route_files(&args),
+        Some("slim") => return slim(&args),
+        Some("points") => return points(&args),
         _ => {}
     }
     let opt = |name: &str, default: &str| -> String {
@@ -263,10 +265,22 @@ fn arg<'a>(args: &'a [String], name: &str) -> Option<&'a String> {
 
 /// `tileroute build <db.duckdb> -o <folder> [--mode driving] [--finest 20]`
 fn build(args: &[String]) -> Result<(), String> {
-    let usage = "usage: tileroute build <db.duckdb> -o <folder> [--mode driving] [--finest 20]";
+    let usage = "usage: tileroute build <db.duckdb> -o <folder> [--mode driving] [--finest 20] [--by-tile]";
     let (Some(db), Some(dir)) = (args.get(1), arg(args, "-o")) else { return Err(usage.into()) };
     let mode = arg(args, "--mode").map_or("driving", |s| s.as_str());
     let finest: u8 = arg(args, "--finest").map_or(Ok(20), |s| s.parse()).map_err(|e| format!("--finest: {e}"))?;
+    if args.iter().any(|a| a == "--by-tile") {
+        let r = tileroute::bytile::build(db.as_ref(), mode, finest, dir.as_ref())?;
+        println!(
+            "built tile by tile: {} nodes ({} in the top), {} arcs, {} zoom-8 tiles, {:.1} MB",
+            r.nodes, r.top_nodes, r.arcs, r.tiles, r.bytes as f64 / 1e6
+        );
+        for (what, secs) in &r.times {
+            println!("  {what}: {secs:.2} s");
+        }
+        println!("peak memory of this process: {:.0} MB", disk::peak_rss() as f64 / 1e6);
+        return Ok(());
+    }
     let t = Instant::now();
     let net = load::read(db.as_ref(), mode, finest)?;
     println!("read: {} nodes, {} arcs, {:.2} s", net.graph.n_nodes(), net.turns.len(), t.elapsed().as_secs_f64());
@@ -288,6 +302,52 @@ fn build(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `tileroute slim <db> <out.duckdb> [--mode driving]`: copy only what tileroute reads (the arcs of the mode, the road
+/// edges and the points of their ends) into a new, small database.
+fn slim(args: &[String]) -> Result<(), String> {
+    let (Some(db), Some(out)) = (args.get(1), args.get(2)) else { return Err("usage: tileroute slim <db> <out.duckdb> [--mode driving]".into()) };
+    let mode = arg(args, "--mode").map_or("driving", |s| s.as_str());
+    // a writable connection: the source read-only, the new file writable
+    let con = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+    con.execute_batch(&format!("LOAD spatial; ATTACH '{db}' AS src (READ_ONLY); USE src;")).map_err(|e| e.to_string())?;
+    let relation = load::relation(&con, mode)?;
+    let sql = format!(
+        "ATTACH '{out}' AS slim;
+         CREATE SCHEMA slim.{mode};
+         CREATE TABLE slim.{mode}.edge_graph AS SELECT from_edge, to_edge, cost FROM {relation};
+         CREATE TABLE slim.{mode}.edges AS SELECT edge_id, source, target FROM {mode}.edges;
+         CREATE TABLE slim.{mode}.nodes AS SELECT node_id, geom FROM {mode}.nodes;
+         DETACH slim;"
+    );
+    con.execute_batch(&sql).map_err(|e| e.to_string())?;
+    println!("wrote {out}: {mode}.edge_graph, {mode}.edges, {mode}.nodes");
+    Ok(())
+}
+
+/// `tileroute points <db> <pairs.csv> <out.csv> [--mode driving]`: for each pair (source, target, cost), the point where
+/// the source road edge starts and the point where the target road edge ends, and the cost of the target edge (for
+/// other routers, which take points).
+fn points(args: &[String]) -> Result<(), String> {
+    let (Some(db), Some(pairs), Some(out)) = (args.get(1), args.get(2), args.get(3)) else {
+        return Err("usage: tileroute points <db> <pairs.csv> <out.csv> [--mode driving]".into());
+    };
+    let mode = arg(args, "--mode").map_or("driving", |s| s.as_str());
+    let con = load::open(db.as_ref())?;
+    con.execute_batch(&format!(
+        "LOAD spatial;
+         COPY (SELECT p.source, p.target, p.cost,
+                      ST_X(a.geom) AS lon1, ST_Y(a.geom) AS lat1, ST_X(b.geom) AS lon2, ST_Y(b.geom) AS lat2,
+                      (SELECT min(g.cost)::DOUBLE FROM {mode}.edge_graph g WHERE g.from_edge = p.target) AS target_cost
+               FROM read_csv('{pairs}') p
+               JOIN {mode}.edges e1 ON e1.edge_id = p.source JOIN {mode}.nodes a ON a.node_id = e1.source
+               JOIN {mode}.edges e2 ON e2.edge_id = p.target JOIN {mode}.nodes b ON b.node_id = e2.target)
+         TO '{out}' (HEADER);"
+    ))
+    .map_err(|e| e.to_string())?;
+    println!("wrote {out}");
+    Ok(())
+}
+
 /// The memory lines of this process from /proc (Linux only).
 fn proc_memory() -> String {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -296,13 +356,29 @@ fn proc_memory() -> String {
 
 /// `tileroute route <folder> --pairs-file CSV [--cache 64]`: a process that only reads the tile files.
 fn route_files(args: &[String]) -> Result<(), String> {
-    let usage = "usage: tileroute route <folder> --pairs-file CSV [--cache 64]";
-    let (Some(dir), Some(path)) = (args.get(1), arg(args, "--pairs-file")) else { return Err(usage.into()) };
+    let usage = "usage: tileroute route <folder> (--pairs-file CSV | --random N) [--cache 64]";
+    let Some(dir) = args.get(1) else { return Err(usage.into()) };
     let cache: usize = arg(args, "--cache").map_or(Ok(64), |s| s.parse()).map_err(|e| format!("--cache: {e}"))?;
     let store = disk::Store::open(dir.as_ref(), cache).map_err(|e| e.to_string())?;
-    // a CSV with the duckOSM edge ids of the start and the target in its first two columns, and a header line
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let pairs: Vec<(i64, i64)> = text
+    let pairs: Vec<(i64, i64)> = if let Some(k) = arg(args, "--random") {
+        // N random pairs of edge ids from edges.idx (a fixed sequence), for an area with no pairs file
+        let k: usize = k.parse().map_err(|e| format!("--random: {e}"))?;
+        let b = std::fs::read(std::path::Path::new(dir).join("edges.idx")).map_err(|e| e.to_string())?;
+        let n = u64::from_le_bytes(b[8..16].try_into().expect("8 bytes")) as usize;
+        let id = |i: usize| i64::from_le_bytes(b[16 + 8 * i..24 + 8 * i].try_into().expect("8 bytes"));
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        (0..k).map(|_| (id(next()), id(next()))).collect()
+    } else {
+        let Some(path) = arg(args, "--pairs-file") else { return Err(usage.into()) };
+        // a CSV with the duckOSM edge ids of the start and the target in its first two columns, and a header line
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        text
         .lines()
         .skip(1)
         .filter(|l| !l.is_empty())
@@ -313,8 +389,11 @@ fn route_files(args: &[String]) -> Result<(), String> {
                 _ => Err(format!("{path}: not two edge ids: {l}")),
             }
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()?
+    };
     println!("opened {dir}: {} tile files; process {:.1} MB peak", store.n_files(), disk::peak_rss() as f64 / 1e6);
+    // --write CSV: the cost of each pair (the sum of the arc costs; -1: no path), from the first pass
+    let mut write: Option<String> = arg(args, "--write").map(|_| String::from("source,target,cost\n"));
     // two passes on one thread: the first maps the files, the second finds them in the cache of the operating system
     for pass in ["first", "second"] {
         let (mut ms, mut tiles, mut bytes, mut max_t, mut max_b, mut found) = (0.0, 0usize, 0usize, 0usize, 0usize, 0usize);
@@ -322,6 +401,11 @@ fn route_files(args: &[String]) -> Result<(), String> {
             let t = Instant::now();
             let (r, st) = store.route(a, b).map_err(|e| e.to_string())?;
             ms += t.elapsed().as_secs_f64() * 1e3;
+            if pass == "first" {
+                if let Some(w) = write.as_mut() {
+                    w.push_str(&format!("{a},{b},{}\n", r.as_ref().map_or(-1.0, |x| x.0)));
+                }
+            }
             found += r.is_some() as usize;
             tiles += st.tiles;
             bytes += st.bytes;
@@ -337,6 +421,9 @@ fn route_files(args: &[String]) -> Result<(), String> {
             bytes as f64 / k / 1e3,
             max_b as f64 / 1e3
         );
+    }
+    if let (Some(path), Some(w)) = (arg(args, "--write"), write) {
+        std::fs::write(path, w).map_err(|e| format!("{path}: {e}"))?;
     }
     println!("files mapped: {}; peak memory of this process: {:.1} MB ({})", store.mapped.load(std::sync::atomic::Ordering::Relaxed), disk::peak_rss() as f64 / 1e6, proc_memory());
     Ok(())

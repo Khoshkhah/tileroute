@@ -20,6 +20,7 @@ only the tiles that it needs, so that a country does not need all of its graph i
 | Why and how the hierarchy is stored in tile files | [Tile files](explanation/tile-files.md) |
 | What the top-down phase gives | [The top-down phase](explanation/top-down.md) |
 | How to update the shortcuts after new costs | [Updates](explanation/updates.md) |
+| How a large area is prepared with little memory | [The preparation tile by tile](explanation/build-by-tile.md) |
 | How a query uses its own weights for many items | [Weights](explanation/weights.md) |
 | How driving, walking and cycling combine | [Modes](explanation/modes.md) |
 | How trains and buses join the walking routes | [Timetable](explanation/timetable.md) |

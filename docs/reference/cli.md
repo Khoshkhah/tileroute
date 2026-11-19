@@ -50,8 +50,19 @@ tileroute build kentucky.duckdb -o kentucky.tiles
 | `-o DIR` | (necessary) | The folder for the files. The command makes it if it does not exist. |
 | `--mode` | `driving` | The duckOSM mode |
 | `--finest` | `20` | The finest level |
+| `--by-tile` | off | Prepare one zoom-8 tile at a time, with much less memory ([The preparation tile by tile](../explanation/build-by-tile.md)); the files are the same format |
 
-It prints the number of files, the size of the top file, of the zoom-8 tile files and of the edge index.
+It prints the number of files, the size of the top file, of the zoom-8 tile files and of the edge index. With
+`--by-tile` it prints the time of each phase and the peak memory of the process.
+
+## tileroute slim
+
+Copy only the tables that tileroute reads (the arcs of the mode, the road edges, the points of their ends) into a new,
+small database. France: 28.5 GB → 2.0 GB.
+
+```bash
+tileroute slim france.duckdb france-slim.duckdb --mode driving
+```
 
 ## tileroute route
 
