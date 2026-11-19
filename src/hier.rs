@@ -49,13 +49,25 @@ impl Csr {
         Csr { off, other: rows.iter().map(|r| r.1).collect(), arc: rows.iter().map(|r| r.2).collect() }
     }
 
-    fn of(&self, v: u32) -> impl Iterator<Item = (u32, Arc)> + '_ {
-        (self.off[v as usize] as usize..self.off[v as usize + 1] as usize).map(move |k| (self.other[k], self.arc[k]))
-    }
-
     fn find(&self, u: u32, w: u32) -> Option<Arc> {
         let r = self.off[u as usize] as usize..self.off[u as usize + 1] as usize;
         self.other[r.clone()].binary_search(&w).ok().map(|k| self.arc[r.start + k])
+    }
+}
+
+/// The arcs of the search, each node's arcs together: (cost, other node) in one array, so a search reads one stream.
+struct Fast {
+    off: Vec<u32>,
+    arc: Vec<(f64, u32)>,
+}
+
+impl Fast {
+    fn new(c: &Csr) -> Fast {
+        Fast { off: c.off.clone(), arc: c.other.iter().zip(&c.arc).map(|(&w, a)| (a.cost, w)).collect() }
+    }
+
+    fn of(&self, v: u32) -> &[(f64, u32)] {
+        &self.arc[self.off[v as usize] as usize..self.off[v as usize + 1] as usize]
     }
 }
 
@@ -80,9 +92,9 @@ pub struct Hierarchy {
     /// all arcs (turns and shortcuts), by the node they leave
     all: Csr,
     /// the forward search: arcs `u -> w` with `level[w] <= level[u]`, by `u`
-    up: Csr,
-    /// the backward search: arcs `u -> w` with `level[u] <= level[w]`, by `w` (`other` is `u`)
-    down: Csr,
+    up: Fast,
+    /// the backward search: arcs `u -> w` with `level[u] <= level[w]`, by `w` (the other node is `u`)
+    down: Fast,
     /// the number of shortcut pairs made at each zoom
     pub shortcuts: Vec<usize>,
     /// for each zoom: the number of sets, and the sum and the largest of the times of their steps (seconds, one thread)
@@ -96,6 +108,9 @@ pub struct Hierarchy {
     paths: Vec<u32>,
     /// for each zoom: the shortcut pairs that the witness search skipped
     pub witnessed: Vec<usize>,
+    /// the node numbers in memory: `to_new[node]`, and back (the hierarchy uses the new numbers inside)
+    to_new: Vec<u32>,
+    to_old: Vec<u32>,
 }
 
 /// The labels of one search direction in flat arrays, used again by the next query of the same thread: a node has a
@@ -137,6 +152,9 @@ impl Labels {
     }
 }
 
+/// Stall-on-demand in the search (an experiment switch).
+const STALL: bool = false;
+
 thread_local! {
     static LABELS: std::cell::RefCell<Option<[Labels; 2]>> = const { std::cell::RefCell::new(None) };
 }
@@ -158,7 +176,7 @@ struct Search {
 ///
 /// `core`: the steps stop at this zoom; the nodes of level `core` and coarser stay as one graph (the core), and the
 /// query searches it in both directions like a plain Dijkstra. 0: the steps go to zoom 1.
-pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: u8) -> Hierarchy {
+pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: u8, renumber: bool) -> Hierarchy {
     let n = level.len();
     // all arcs that ever were (never removed), and the nodes with an arc into each node
     let mut arcs: Vec<HashMap<u32, Arc>> = vec![HashMap::new(); n];
@@ -239,7 +257,38 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: 
             }
         }
     }
-    Hierarchy { all: Csr::new(n, all), up: Csr::new(n, up), down: Csr::new(n, down), level, cell, shortcuts, steps, pairs, inner, paths, witnessed }
+    // the memory order: new node numbers by level (the top first), then by cell, so that the nodes that a query reads
+    // most are near each other in memory
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    if renumber {
+        order.sort_unstable_by_key(|&v| (level[v as usize], cell[v as usize], v));
+    }
+    let mut to_new = vec![0u32; n];
+    for (i, &v) in order.iter().enumerate() {
+        to_new[v as usize] = i as u32;
+    }
+    let map = |rows: Vec<(u32, u32, Arc)>| -> Vec<(u32, u32, Arc)> {
+        rows.into_iter().map(|(u, w, a)| (to_new[u as usize], to_new[w as usize], a)).collect()
+    };
+    let (all, up, down) = (map(all), map(up), map(down));
+    let paths: Vec<u32> = paths.into_iter().map(|v| to_new[v as usize]).collect();
+    let level: Vec<u8> = order.iter().map(|&v| level[v as usize]).collect();
+    let cell: Vec<u64> = order.iter().map(|&v| cell[v as usize]).collect();
+    Hierarchy {
+        all: Csr::new(n, all),
+        up: Fast::new(&Csr::new(n, up)),
+        down: Fast::new(&Csr::new(n, down)),
+        level,
+        cell,
+        shortcuts,
+        steps,
+        pairs,
+        inner,
+        paths,
+        witnessed,
+        to_new,
+        to_old: order,
+    }
 }
 
 /// The shortcuts over the set `xs` (level `z`, cell `t`): for each node `u` with a turn into the set, a Dijkstra in the
@@ -387,13 +436,13 @@ impl Hierarchy {
             }
             // stall: the arcs from higher nodes into v (forward), or from v to higher nodes (backward)
             let (go, back) = if dir == 0 { (&self.up, &self.down) } else { (&self.down, &self.up) };
-            if back.of(v).any(|(w, a)| r.label[dir].get(w).is_some_and(|(dw, _)| dw + a.cost < d)) {
+            if STALL && back.of(v).iter().any(|&(c, w)| r.label[dir].get(w).is_some_and(|(dw, _)| dw + c < d)) {
                 continue;
             }
-            for (w, a) in go.of(v) {
+            for &(c, w) in go.of(v) {
                 r.relaxed += 1;
                 r.by_level[self.level[v as usize] as usize] += 1;
-                let nd = d + a.cost;
+                let nd = d + c;
                 if r.label[dir].get(w).is_none_or(|(e, _)| nd < e) {
                     r.label[dir].set(w, nd, v);
                     heap[dir].push(Key(nd, w));
@@ -433,6 +482,7 @@ impl Hierarchy {
 
     /// Where the time of one query goes: (nodes settled, search seconds, unpack seconds, path nodes, arcs opened).
     pub fn profile(&self, s: u32, t: u32) -> (usize, f64, f64, usize, usize) {
+        let (s, t) = (self.to_new[s as usize], self.to_new[t as usize]);
         let t0 = std::time::Instant::now();
         let r = self.search(s, t, false, 0);
         let ts = t0.elapsed().as_secs_f64();
@@ -457,7 +507,8 @@ impl Hierarchy {
     /// An experiment, **not exact**: the search may not go above the ancestor `k` zooms coarser than the common tile
     /// of `s` and `t` (k = 0: the common tile itself). A best route that leaves that tile is missed.
     pub fn route_limited(&self, s: u32, t: u32, k: u8) -> Option<(f64, Vec<u32>)> {
-        let l = crate::tile::lca_zoom(self.cell[s as usize], self.cell[t as usize]).saturating_sub(k);
+        let (cs, ct) = (self.cell[self.to_new[s as usize] as usize], self.cell[self.to_new[t as usize] as usize]);
+        let l = crate::tile::lca_zoom(cs, ct).saturating_sub(k);
         self.route_full(s, t, false, l).0
     }
 
@@ -469,6 +520,7 @@ impl Hierarchy {
         if s == t {
             return (Some((0.0, vec![s])), 1);
         }
+        let (s, t) = (self.to_new[s as usize], self.to_new[t as usize]);
         let r = self.search(s, t, stats, lowest);
         let tiles = r.tiles.len();
         if r.meet == u32::MAX {
@@ -480,7 +532,7 @@ impl Hierarchy {
         self.chain(&r, 1, r.meet, &mut path);
         let best = r.best;
         Self::done(r);
-        (Some((best, path)), tiles)
+        (Some((best, path.into_iter().map(|v| self.to_old[v as usize]).collect())), tiles)
     }
 
     /// Add the nodes of the arc `a -> b` after `a` (which is already in `path`).
@@ -504,20 +556,37 @@ impl Hierarchy {
     /// which only a rebuild needs).
     pub fn query_bytes(&self) -> usize {
         let csr = |c: &Csr| c.off.len() * 4 + c.other.len() * 4 + c.arc.len() * std::mem::size_of::<Arc>();
-        csr(&self.all) + csr(&self.up) + csr(&self.down) + self.level.len() + self.cell.len() * 8 + self.paths.len() * 4
+        let fast = |c: &Fast| c.off.len() * 4 + c.arc.len() * 16;
+        csr(&self.all) + fast(&self.up) + fast(&self.down) + self.level.len() + self.cell.len() * 8 + self.paths.len() * 4
     }
 
     /// The arcs opened from the settled nodes of each level, summed over the queries `pairs`.
     pub fn arcs_by_level(&self, pairs: &[(u32, u32)]) -> [usize; 32] {
         let mut sum = [0usize; 32];
         for &(s, t) in pairs {
-            let r = self.search(s, t, false, 0);
+            let r = self.search(self.to_new[s as usize], self.to_new[t as usize], false, 0);
             for (a, b) in sum.iter_mut().zip(r.by_level.iter()) {
                 *a += b;
             }
             Self::done(r);
         }
         sum
+    }
+
+    /// For each level: (nodes, sum of out-degrees in the shortcut graph, sum of forward-search degrees, largest
+    /// forward-search degree).
+    pub fn degrees(&self) -> Vec<(usize, usize, usize, usize)> {
+        let mut d = vec![(0, 0, 0, 0); 32];
+        for v in 0..self.level.len() {
+            let x = &mut d[self.level[v] as usize];
+            let all = (self.all.off[v + 1] - self.all.off[v]) as usize;
+            let up = (self.up.off[v + 1] - self.up.off[v]) as usize;
+            x.0 += 1;
+            x.1 += all;
+            x.2 += up;
+            x.3 = x.3.max(up);
+        }
+        d
     }
 
     pub fn n_arcs(&self) -> usize {

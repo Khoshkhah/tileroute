@@ -56,14 +56,36 @@ Where the time of one tileroute query goes (Kentucky, the same pairs, one thread
 | One query | about 10.5 ms | 7.3 ms (WSL PC) |
 | Query data in memory | 1,168 MB | 925 MB |
 
-The saved paths remove the unpack cost. The search stays slow because each settled node has many arcs: the top of the
-hierarchy is dense.
+The saved paths remove the unpack cost. The **memory layout** then gives the next big gain (Kentucky, 2,000 pairs, one
+thread, the same algorithm and the same arcs):
+
+| Memory layout | One query |
+|---|---|
+| Node numbers in the order of the database rows | 7.3 ms |
+| Node numbers by level, the top first (the nodes that a query reads most are together) | 4.0 ms |
+| + the search arcs as one array of (cost, node) | 3.2 ms |
+| + no stall-on-demand (its extra reads cost more than they save) | **2.35 ms** |
+
+The query data in memory went down to 802 MB.
+
+**Degree of the nodes** (Kentucky): on average 7.1 arcs leave each node of the shortcut graph, but the top nodes have
+hundreds:
+
+| Zoom | Nodes | Mean out-degree | Mean degree in the forward search |
+|---|---|---|---|
+| 5 to 7 | 3,340 | 320 to 383 | 147 to 178 |
+| 8 | 3,241 | 164 | 103 |
+| 9 to 12 | 96,267 | 21 to 84 | 13 to 52 |
+| 13 to 20 | 2,046,590 | 2.6 to 12.8 | 2.6 to 7.8 |
+
+So a query still opens about 540,000 arcs, 85% of them at zoom 5 to 8. A different order at the top would cut that
+number; the memory layout makes each arc cheap.
 
 | Cause | Effect | Fix |
 |---|---|---|
 | The order comes from the tiles only, and there is no witness search | the top of the hierarchy is dense (zoom 6: 137,928 shortcuts for 360 nodes), so the search opens many arcs | a witness search (skip a shortcut when a path of the same cost exists without it); important roads higher inside each set |
 | Each shortcut was unpacked with a Dijkstra in its tile | 3.1 ms for each query | **done**: each shortcut saves its inner nodes (on average 1.7); unpack 0.16 ms |
-| Labels in hash maps; no stall-on-demand | slower steps | **done**: flat arrays and stall-on-demand (small effect, because of the dense top) |
+| Labels in hash maps; node numbers in the order of the database rows | slower steps, cache misses | **done**: flat label arrays, node numbers by level, search arcs in one array: 7.3 → 2.35 ms |
 | Each arc is stored three times, 24 bytes each (all, up, down) | 1.1 GB for Kentucky | one arc list with indices; a small tile number in place of the 64-bit key |
 
 These fixes are milestone M2c of the [Plan](../plan.md).

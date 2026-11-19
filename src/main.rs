@@ -41,7 +41,8 @@ fn run() -> Result<(), String> {
 
     let t = Instant::now();
     let core: u8 = opt("--core", "0").parse().map_err(|e| format!("--core: {e}"))?;
-    let h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone(), core);
+    let renumber = !args.iter().any(|a| a == "--no-renumber");
+    let h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone(), core, renumber);
     println!("shortcuts: {} pairs made, {} arcs in all, {:.3} s", h.shortcuts.iter().sum::<usize>(), h.n_arcs(), t.elapsed().as_secs_f64());
     for (z, c) in h.shortcuts.iter().enumerate() {
         let nodes = net.level.iter().filter(|&&l| l as usize == z).count();
@@ -57,6 +58,16 @@ fn run() -> Result<(), String> {
     }
 
     println!("witness search: {} of {} shortcut pairs not needed", h.witnessed.iter().sum::<usize>(), h.shortcuts.iter().sum::<usize>());
+    if args.iter().any(|a| a == "--degrees") {
+        let d = h.degrees();
+        let (nn, na) = d.iter().fold((0, 0), |a, x| (a.0 + x.0, a.1 + x.1));
+        println!("degree: mean {:.2} arcs out of each node ({nn} nodes, {na} arcs)", na as f64 / nn as f64);
+        for (z, &(k, all, up, max)) in d.iter().enumerate() {
+            if k > 0 {
+                println!("  zoom {z:2}: {k:8} nodes, mean out-degree {:7.1}, mean forward-search degree {:7.1}, largest {max}", all as f64 / k as f64, up as f64 / k as f64);
+            }
+        }
+    }
     let (k, sum) = h.inner.iter().fold((0u64, 0u64), |a, x| (a.0 + x.0, a.1 + x.1));
     println!("inner nodes of a shortcut path: mean {:.2} over {k} pairs, largest {}", sum as f64 / k.max(1) as f64, h.inner.iter().map(|x| x.2).max().unwrap_or(0));
     for (z, &(k, sum, max)) in h.inner.iter().enumerate() {
