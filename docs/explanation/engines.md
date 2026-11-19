@@ -133,5 +133,5 @@ These fixes are milestone M2c of the [Plan](../plan.md).
 |---|---|---|
 | Queries slower than OSRM CH and GraphHopper CH (Mac mini: 0.66 ms in memory, 0.81 ms from the files, against 0.58 and 0.38 ms) | the dense top of the hierarchy (many arcs for each top node) | done: saved paths, memory layout, witness search, arc reduction; tileroute is now near OSRM CH and faster than OSRM MLD |
 | More shortcuts than a graph partitioner would make | tile borders do not follow the roads | accepted for one tiling protocol |
-| A query reads 8.8 MB of tile files (Kentucky) | the arcs of the low levels are large, and each arc is stored three times | a smaller arc, one arc list ([Tile files](../reference/tile-files.md#next-steps)) |
+| A query reads 3.0 MB of tile files on average (Kentucky, with arc reduction; 8.8 MB before) | the arcs of the low levels are large, and each arc is stored three times | a smaller arc, one arc list ([Tile files](../reference/tile-files.md#next-steps)) |
 | Not a full product | no snapping of points to roads, no turn instructions, no server, no browser yet | later milestones |
