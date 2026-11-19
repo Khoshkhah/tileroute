@@ -61,11 +61,16 @@ one thread; "cold" is the first pass after the start, "warm" the second.
 | GraphHopper CH 11.1 (no turn costs) | import 211 s | 8.8 GB | 1.7 GB | **0.89** / 1.17 ms | 3.9 GB (Java) |
 | OSRM CH 26.11 | extract 677 s + contract 549 s | 11.9 GB | 8.4 GB | 1.15 / 1.48 ms | 5.6 GB |
 | OSRM MLD 26.11 | extract 672 s + partition 146 s + customize 20 s | 12.4 GB | 9.3 GB | 2.95 / 3.52 ms | 5.2 GB |
-| **tileroute** (from tile files) | duckOSM 372 s + slim 5 s + `build --by-tile` 547 s | 9.5 GB | 8.1 GB | 5.32 / 10.3 ms | 4.0 GB ¹ |
+| **tileroute, partition version** (from tile files) ² | duckOSM 361 s + slim 4 s + `build --by-tile --partition 16` 545 s | 8.4 GB | 4.7 GB | **0.54** / 1.35 ms | 2.1 GB ¹ |
+| tileroute, tile version (from tile files) | duckOSM 372 s + slim 5 s + `build --by-tile` 547 s | 9.5 GB | 8.1 GB | 5.32 / 10.3 ms | 4.0 GB ¹ |
 | duckOSM's router today | load 11 to 16 s | — | — | 3.7 s (Paris to Marseille) | 6.4 GB |
 
-¹ The peak of the query process: almost all of it is pages of the mapped tile files; a query reads 7.2 tiles and 31 MB
-on average.
+¹ The peak of the query process: almost all of it is pages of the mapped tile files. A query reads on average 7.0
+files and 1.5 MB (partition version), or 7.2 files and 31 MB (tile version).
+
+² The same Mac, the same `.osm.pbf` and the same 2,000 pairs (`--pairs-file`), measured later on 2026-11-19. The
+cells come from the inertial flow partition ([Cells from the graph](partition.md)). Both versions find a route for
+the same 1,939 pairs.
 
 **The routes of the 2,000 pairs:**
 
@@ -87,10 +92,12 @@ cannot match edge by edge; tileroute's routes equal duckOSM's router where that 
 
 GraphHopper found no route for 17 pairs (16 of them have a route in tileroute): it did not find a road near the point.
 
-**What this shows:** on France, tileroute needs a little less memory than OSRM to prepare (9.5 GB against 11.9 to
-12.4 GB) and less time in all (about 15 minutes with duckOSM's build, against 14 to 20 minutes for OSRM). Its queries
-are 4.6 times slower than OSRM CH and 1.8 times slower than OSRM MLD. The reason is the top of the hierarchy: 28,192
-nodes and a 794 MB top file, which most queries read.
+**What this shows:** with the tile version, tileroute's queries are 4.6 times slower than OSRM CH, because of the top
+of the hierarchy (28,192 nodes, a 794 MB top file). With the partition version, the top has 4,184 nodes and the
+queries are about 10 times faster: 0.54 ms warm, faster than GraphHopper CH (0.89 ms) and OSRM CH (1.15 ms) on this Mac;
+1.35 ms cold, near GraphHopper (1.17 ms) and OSRM CH (1.48 ms). The preparation needs less memory than all others
+except GraphHopper (8.4 GB), and about 15 minutes with duckOSM's build. Note: GraphHopper here has no turn costs,
+tileroute and OSRM have them.
 
 ## Why tileroute is slower and larger today
 

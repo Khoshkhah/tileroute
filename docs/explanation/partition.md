@@ -2,8 +2,8 @@
 
 !!! note "Status"
     An option, not the default: `tileroute check --partition 16` and `tileroute build --by-tile --partition 16`.
-    Measured on Monaco and Kentucky. France is not measured yet. The XYZ tile version stays the default until France
-    is measured.
+    Measured on Monaco, Kentucky and France. On France the queries are about 10 times faster than with the XYZ tiles
+    ([Results: France](#results-france)).
 
 This page describes the partition version: the same method as the [tile version](levels.md), but the cells come from
 a partition of the road graph, not from the XYZ tiles. It is step D1 of
@@ -117,6 +117,35 @@ from the files are equal to the routes in memory (2,000 of 2,000).
 **The cuts of each level (Kentucky),** in road edges: 120, 354, 952, 2,184, 5,256, 13,641, 37,187, 96,182, 133,631,
 64,990, 11,863, 956, 10. The other 1,782,112 road edges are inside the leaf cells.
 
+## Results: France
+
+Mac mini (16 GB), 2026-11-19, `bench/francebench.sh` with `TRARGS="--partition 16"`. The same `.osm.pbf` and the same
+2,000 pairs as the tile version ([Comparison with other routers](engines.md#measured-on-france)). One thread.
+
+| | Tile version | Partition version |
+|---|---|---|
+| Top nodes | 28,192 (level 7 and coarser) | 4,184 (level 2 and coarser) |
+| `build --by-tile`, in all | 547 s | 545 s |
+| of this: cells (the partition) | — | 478 s |
+| of this: steps below the top | 129 s | 15 s |
+| of this: steps of the top | 256 s | 0.8 s |
+| of this: arc reduction and files | 121 s | 16 s |
+| Peak memory of the build | 9.7 GB | 8.4 GB |
+| Files | 8.1 GB (72 zoom-8 files and the top) | 4.7 GB (64 level-3 files and the top) |
+| One query, warm (second pass) | 5.32 ms | **0.54 ms** |
+| One query, cold (first pass) | 10.3 ms | **1.35 ms** |
+| Read for each query | 7.2 files, 31 MB | 7.0 files, 1.5 MB |
+| Memory of the query process | 4.3 GB | 2.1 GB |
+| Pairs with a route | 1,939 of 2,000 | 1,939 of 2,000 |
+
+On the same Mac, OSRM CH needs 1.15 / 1.48 ms (warm / cold) and GraphHopper CH (no turn costs) 0.89 / 1.17 ms.
+
+**Now the partition is the slow part of the build** (478 s of 545 s): the first cuts are large maximum-flow problems
+on all 11 million junctions, and only the 4 lines of a cut run in parallel there. The steps themselves take 32 s.
+
+Not checked for France: the routes against duckOSM's router (the check needs all of France in memory), and the costs
+pair by pair against the tile version. Monaco and Kentucky are checked (0 wrong).
+
 ## What the tiles still do
 
 | Use | Why the tiles stay |
@@ -195,6 +224,6 @@ builds on the cells, and in how the query uses them.
 
 | Step | Done means |
 |---|---|
-| France on the Mac mini (`TRARGS="--partition 16"` in `bench/francebench.sh`) | preparation time, peak memory, query time warm and cold and MB read for each query, next to the tile version and the other routers |
+| A faster partition (the first cuts in parallel, or fewer junctions with a coarse graph first) | France: the cells in less than 100 s |
 | The mix (tiles inside small cells) | Kentucky: the same table, next to the partition version |
 | The partition as the default | after France, if the result is as on Kentucky |

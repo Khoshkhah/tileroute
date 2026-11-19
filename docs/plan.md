@@ -66,7 +66,7 @@ So the shortcuts do not hold time functions; they only make the exact time-depen
 | **M6 Many modes** | Walking and cycling checks; one-to-many and many-to-many queries; combined graphs (free change, then rules), with the same model as duckOSM's `route_multimodal` | each mode and each combined graph: 0 wrong routes against duckOSM |
 | **M7 Timetable** | GTFS input, stops with tile keys, walking transfers from the hierarchy, RAPTOR, then McRAPTOR with weights; door-to-door join | equal to a plain time-dependent search for random stops and times |
 | **M7b Predicted traffic** | Slices from SonoFlow's prediction (flow to time, FIFO), one rebuild for each slice, the query by departure time; then the search that changes slices along the route | for each slice, 0 wrong routes against duckOSM's router with that slice; along the route, equal to a plain time-dependent Dijkstra |
-| **D1 Cells from the graph** (Kentucky done: 1.79 → 0.23 ms; France waits) | An inertial flow partition gives the cells ([page](explanation/partition.md)) | France measured on the Mac mini next to the tile version |
+| **D1 Cells from the graph** (done: Kentucky 1.79 → 0.23 ms; France 5.32 → 0.54 ms) | An inertial flow partition gives the cells ([page](explanation/partition.md)) | France measured on the Mac mini next to the tile version |
 | **D2 to D5 The whole world** | Regions and the overlay, servers, Europe, a load test ([page](explanation/distributed.md)) | France below 2 ms for each query with small sets; then the steps on that page |
 | **M8 Browser** | WebAssembly package, archive read with HTTP range reads or from browser storage, a demo page | the browser gives the same routes as native, for driving, walking and a timetable trip |
 
