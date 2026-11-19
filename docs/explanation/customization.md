@@ -157,6 +157,48 @@ parallel, and the route with the smallest cost for the weights wins: 1.43 ms for
 0.60 ms). Against the exact metric mix30: 27.1% of the routes exact, mean error 0.29%, largest error 4.0%; against
 mix70: 44.5% exact, mean error 0.14%, largest error 5.7%.
 
+## Results: France
+
+Mac mini (16 GB), 2026-11-19, `bench/france-weights.sh` with `GUARD_GB=25`: the same `.osm.pbf` and the same 2,000
+pairs as the other France measurements ([Comparison with other routers](engines.md#measured-on-france)). One thread.
+
+| | Value |
+|---|---|
+| duckOSM, then `slim` | 337 s (peak 9.7 GB), 4 s |
+| `build --by-tile --partition 16 --xyz-files --cch --metrics time,length,mix50,mix30` | **676 s, peak 9.2 GB** |
+| of this: nodes with the partition | 475 s |
+| of this: structure and customization of 4 metrics in the units, the top | 53 s, 6 s |
+| of this: mask and files | 110 s |
+| Edges of the structure | 209 million (top: 4,184 nodes) |
+| Files | 16.3 GB: `structure/` 2.2 GB (shared), 3.2 GB for each metric, 72 zoom-8 files and the top |
+
+| Metric | One query, warm (second pass) | cold (first pass) | Memory of the query process |
+|---|---|---|---|
+| time | 2.57 ms | 6.0 ms | 3.8 GB |
+| length | 3.67 ms | 6.1 ms | 5.0 GB |
+| mix50 | 3.04 ms | 5.6 ms | 4.5 GB |
+| mix30 | 3.24 ms | 7.2 ms | 4.7 GB |
+| For comparison: the hierarchy with the witness search, partition cells | 0.54 ms | 1.35 ms | 2.1 GB |
+
+**The weighted query** (3 candidates, time, length and mix50, searched in parallel): 7.7 ms for each query (one
+search alone: 2.6 ms). Against the exact metric mix30: 5.5% of the routes exact, **mean error 0.54%, largest error
+4.1%**. With 2 candidates (time and length): mean error 1.9%, largest error 6.9%.
+
+**Correctness:** 100 random pairs with duckOSM's router (`tileroute reference`, 13.5 s to load, 10.9 GB): 100 of 100
+costs equal to the files (metric time). All 4 metrics find a route for the same 1,939 of the 2,000 pairs.
+
+**What this shows:**
+
+- **Many metrics on France work on the Mac mini:** one build of 11 minutes and 9.2 GB makes the shared structure and
+  4 metrics; each more metric is 3.2 GB of files and less than 1 minute of customization in the units.
+- **The queries are about 5 times slower than the hierarchy with the witness search** (2.57 against 0.54 ms): the
+  structure has no witness search, so it has more edges; the search reads more files (12.7 against 7.0); and the
+  unpack searches the lower neighbours. Each metric pays this, so the weighted query takes 7.7 ms.
+- **The weighted estimate** stays near on France too (mean error 0.54% with 3 candidates); single pairs can be off
+  by up to 4%.
+- **Next for speed:** f32 costs next to the node numbers, the middle nodes back as an option, and fewer files for
+  each query.
+
 ## Weights for each query: the best of a few routes
 
 A query can give its own weights: cost = w₁ · time + w₂ · length + … A customization for each query takes seconds,
