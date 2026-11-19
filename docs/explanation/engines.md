@@ -28,7 +28,9 @@ all routers: the start point of a road edge and the end point of another road ed
 - ² Not comparable yet: tileroute has no query-only process. Its query data (computed size) is 1,169 MB in the first
   version and 802 MB now (hierarchy 750 MB + edge ids 52 MB), but the measured process holds 3.2 GB after the
   preparation, with the leftovers of the preparation and duckOSM's reference graph. A fair measurement needs a process
-  that only loads a finished hierarchy (milestone M3).
+  that only loads a finished hierarchy (milestone M3). M3 has this process now ([Tile files](../reference/tile-files.md)),
+  measured on the WSL PC, not yet on the Mac mini: 793 MB of files; after the 2,000 pairs, 764 MB resident, of which
+  745 MB are pages of the mapped files and 1.4 MB own memory; 2.6 ms for one query (in memory on the same PC: 2.4 ms).
 - The preparation of tileroute starts from the duckOSM database, so the work of reading the `.osm.pbf` (OSRM's extract,
   GraphHopper's import) is not in its number; duckOSM's build of Kentucky took 29 s for that work.
 
@@ -103,7 +105,7 @@ These fixes are milestone M2c of the [Plan](../plan.md).
 | GraphHopper | Contraction Hierarchies (fixed), or Landmarks (A* with distances to some nodes, made one time) | CH as OSRM; Landmarks faster | CH: ms; Landmarks: tens of ms | Landmarks keep working with new costs | yes ("custom models", with Landmarks) | no |
 | Valhalla | Tiles with three road-class levels, A* | the cut into tiles | tens to hundreds of ms for long routes | yes, traffic for each tile | yes (costing options) | yes, on demand, with a cache |
 | Google Maps | not public | | | live traffic | | |
-| **tileroute** | Shortcuts by XYZ tile (a contraction hierarchy ordered by tiles), exact | Kentucky 10.5 s (Mac mini) | Kentucky 1.38 ms (Mac mini, one thread, in memory) | a rebuild of all costs (seconds) | planned, exact (hull corners, M5) | planned (M3) |
+| **tileroute** | Shortcuts by XYZ tile (a contraction hierarchy ordered by tiles), exact | Kentucky 10.5 s (Mac mini) | Kentucky 1.38 ms (Mac mini, one thread, in memory) | a rebuild of all costs (seconds) | planned, exact (hull corners, M5) | yes: one file for each zoom-8 tile, memory-mapped on demand (M3) |
 
 ## Transit routers
 
@@ -127,5 +129,5 @@ These fixes are milestone M2c of the [Plan](../plan.md).
 |---|---|---|
 | Queries slower than OSRM CH (1.38 ms against 0.58 ms on the same Mac) | no witness search (more shortcuts), hash maps in the search, each shortcut unpacked with a Dijkstra | flat arrays for the labels, a stored middle node for each shortcut |
 | More shortcuts than a graph partitioner would make | tile borders do not follow the roads | accepted for one tiling protocol |
-| Everything in memory today | the tile files are not made yet | M3 |
+| A query reads 8.8 MB of tile files (Kentucky) | the arcs of the low levels are large, and each arc is stored three times | a smaller arc, one arc list ([Tile files](../reference/tile-files.md#next-steps)) |
 | Not a full product | no snapping of points to roads, no turn instructions, no server, no browser yet | later milestones |

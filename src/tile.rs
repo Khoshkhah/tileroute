@@ -36,6 +36,18 @@ pub fn parent(k: u64, r: u8) -> u64 {
     (k & !((1u64 << shift(r)) - 1)) | r as u64
 }
 
+/// The x and the y of a tile.
+pub fn xy(k: u64) -> (u64, u64) {
+    let d = k >> shift(zoom(k));
+    let (mut x, mut y) = (0, 0);
+    for i in 0..zoom(k) {
+        let q = (d >> (2 * i)) & 3;
+        x |= (q & 1) << i;
+        y |= (q >> 1) << i;
+    }
+    (x, y)
+}
+
 /// The zoom of the lowest common ancestor of two tiles.
 pub fn lca_zoom(a: u64, b: u64) -> u8 {
     let m = zoom(a).min(zoom(b));
@@ -58,6 +70,7 @@ mod tests {
         assert_eq!(k8, 1778007059137036296);
         assert_eq!(k28, 1778020963338276700);
         assert_eq!(parent(k28, 8), k8);
+        assert_eq!(xy(k8), (133, 93));
         assert_eq!(parent(k28, 0), 0);
         assert_eq!(lca_zoom(k28, k8), 8);
         assert_eq!(lca_zoom(k28, k28), 28);

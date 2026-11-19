@@ -29,9 +29,44 @@ tileroute check kentucky.duckdb --mode driving --pairs 10000
 | `--core Z` | 0 | Stop the steps at zoom Z; the coarser nodes stay as one graph that the query searches in both directions (an experiment; slower on Kentucky) |
 | `--no-reference` | off | Do not compare with duckOSM's router; print only tileroute's time per query |
 | `--write-pairs FILE` | none | Write the pairs and tileroute's costs as CSV (`source,target,cost`), for other routers |
+| `--files DIR` | none | Also answer each pair from the tile files in `DIR` (from `tileroute build`), and compare with the route in memory. Stops with exit code 2 if a route is wrong. |
 
 The command reads the tile columns of duckOSM (`edges.from_tile`, `edges.to_tile`) when they are in the database. If
 not, it gets the tiles from the node points (it needs DuckDB's `spatial` extension).
 
 It prints the number of nodes and arcs, the shortcuts and the step times for each zoom, the tiles per query, the
 result of the comparison, and the time for one query. It stops with exit code 2 if a route is wrong.
+
+## tileroute build
+
+Make the shortcuts of one mode, then write them to tile files in a folder ([Tile files](tile-files.md)).
+
+```bash
+tileroute build kentucky.duckdb -o kentucky.tiles
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-o DIR` | (necessary) | The folder for the files. The command makes it if it does not exist. |
+| `--mode` | `driving` | The duckOSM mode |
+| `--finest` | `20` | The finest level |
+
+It prints the number of files, the size of the top file, of the zoom-8 tile files and of the edge index.
+
+## tileroute route
+
+Answer pairs from the tile files only. The process does not open the duckOSM database and does not make shortcuts, so
+its memory is the memory of a query server.
+
+```bash
+tileroute route kentucky.tiles --pairs-file points2000.csv
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--pairs-file CSV` | (necessary) | The pairs: the duckOSM edge ids of the start and the target in the first two columns, and a header line |
+| `--cache N` | `64` | The number of open (memory-mapped) tile files that the process keeps |
+
+It answers all pairs two times on one thread. The first pass maps the files; in the second pass the files are in the
+cache of the operating system. For each pass it prints the time for one query, and the tiles and bytes that one query
+reads. At the end it prints the peak memory of the process.

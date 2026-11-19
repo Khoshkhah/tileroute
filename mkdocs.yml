@@ -67,3 +67,4 @@ nav:
   - Reference:
       - The command line: reference/cli.md
       - Measurements: reference/measurements.md
+      - Tile files: reference/tile-files.md

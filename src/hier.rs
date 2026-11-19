@@ -18,6 +18,8 @@ use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
+mod write;
+
 
 
 /// An arc: its cost, and for a shortcut where its inner nodes are in `Hierarchy::paths`.
