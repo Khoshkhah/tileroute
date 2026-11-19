@@ -26,7 +26,7 @@ fn run() -> Result<(), String> {
     let t = Instant::now();
     let net = load::read(db.as_ref(), &mode, finest)?;
     let n = net.graph.n_nodes();
-    println!("read: {n} nodes, {} turns, {:.2} s", net.turns.len(), t.elapsed().as_secs_f64());
+    println!("read: edge graph with {n} nodes (road edges) and {} arcs (edge_graph rows), {:.2} s", net.turns.len(), t.elapsed().as_secs_f64());
 
     let t = Instant::now();
     let h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone());
@@ -69,7 +69,7 @@ fn run() -> Result<(), String> {
             (None, None) => none += 1,
             (Some((d, p)), Some((rd, rp))) => {
                 let mine: Vec<i64> = p.iter().map(|&v| ids[v as usize]).collect();
-                // the cost of our path, from the turns, in order
+                // the cost of our path, from the arcs, in order
                 let own = p.windows(2).map(|w| weight.get(&(w[0], w[1])).copied()).try_fold(0.0, |s, c| c.map(|c| s + c));
                 if own != Some(*d) || d != rd {
                     bad.push(i);
