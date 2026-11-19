@@ -14,9 +14,11 @@ ONLY=${ONLY:-}
 mkdir -p results work
 step() { echo "== $(date +%H:%M:%S) $* (free: $(df -g / | awk 'NR==2{print $4}') GB)"; }
 want() { [ -z "$ONLY" ] || [[ " $ONLY " == *" $1 "* ]]; }
-need() {  # stop when less than 30 GB would stay free
+GUARD_GB=${GUARD_GB:-30}  # the free disk that must stay (guard.sh reads it too)
+export GUARD_GB
+need() {  # stop when less than GUARD_GB would stay free
   local free; free=$(df -g / | awk 'NR==2{print $4}')
-  if [ "$free" -lt 32 ]; then echo "STOP: only $free GB free"; exit 1; fi
+  if [ "$free" -lt $((GUARD_GB + 2)) ]; then echo "STOP: only $free GB free"; exit 1; fi
 }
 # measure NAME CMD...: wall time and peak memory, under the disk guard
 measure() {
