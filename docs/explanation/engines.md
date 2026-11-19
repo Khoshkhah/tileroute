@@ -18,13 +18,14 @@ all routers: the start point of a road edge and the end point of another road ed
 | GraphHopper CH | 11.1 | import 20.8 s (CH and Landmarks together) | 3.8 GB | 200 MB | **0.38 ms** | 807 MB (Java) |
 | GraphHopper Landmarks | 11.1 | the same import | | | 3.7 ms | 807 MB (Java) |
 | Valhalla | 3.9.3 | tiles 9.2 s | 2.8 GB | 258 MB | 5.2 ms | 614 MB |
-| **tileroute** | 0.1 | read 1.5 s + shortcuts 6.1 s | 5.2 GB ¹ | (no files yet) | 5.3 ms | 1,168 MB ² |
+| **tileroute**, first version | 0.1 | read 1.5 s + shortcuts 6.1 s | 5.2 GB ¹ | (no files yet) | 5.3 ms | 1,168 MB ² |
+| **tileroute**, 2026-11-19 (saved paths, witness search, memory layout) | 0.1 | read 1.6 s + shortcuts 8.9 s | 4.3 GB ¹ | (no files yet) | **1.38 ms** | 802 MB ² |
 
 - The router queries go over HTTP on the same computer, one at a time with one kept connection: their time includes a
   small HTTP cost (about 0.1 ms). tileroute is called directly. Memory at query time: the server process after the
   10,000 queries.
 - ¹ The peak of the whole run (read, shortcuts, queries).
-- ² The data that a query needs: the hierarchy (1,117 MB) and the edge ids (52 MB). The process holds more, because the
+- ² The data that a query needs: the hierarchy (first version 1,117 MB, now 750 MB) and the edge ids (52 MB). The process holds more, because the
   check also keeps duckOSM's reference graph.
 - The preparation of tileroute starts from the duckOSM database, so the work of reading the `.osm.pbf` (OSRM's extract,
   GraphHopper's import) is not in its number; duckOSM's build of Kentucky took 29 s for that work.
@@ -100,7 +101,7 @@ These fixes are milestone M2c of the [Plan](../plan.md).
 | GraphHopper | Contraction Hierarchies (fixed), or Landmarks (A* with distances to some nodes, made one time) | CH as OSRM; Landmarks faster | CH: ms; Landmarks: tens of ms | Landmarks keep working with new costs | yes ("custom models", with Landmarks) | no |
 | Valhalla | Tiles with three road-class levels, A* | the cut into tiles | tens to hundreds of ms for long routes | yes, traffic for each tile | yes (costing options) | yes, on demand, with a cache |
 | Google Maps | not public | | | live traffic | | |
-| **tileroute** | Shortcuts by XYZ tile (a contraction hierarchy ordered by tiles), exact | Kentucky 7.6 s (Mac mini) | Kentucky 5.3 ms (Mac mini, one thread, in memory) | a rebuild of all costs (seconds) | planned, exact (hull corners, M5) | planned (M3) |
+| **tileroute** | Shortcuts by XYZ tile (a contraction hierarchy ordered by tiles), exact | Kentucky 10.5 s (Mac mini) | Kentucky 1.38 ms (Mac mini, one thread, in memory) | a rebuild of all costs (seconds) | planned, exact (hull corners, M5) | planned (M3) |
 
 ## Transit routers
 
@@ -122,7 +123,7 @@ These fixes are milestone M2c of the [Plan](../plan.md).
 
 | Weak point | Reason | Possible fix |
 |---|---|---|
-| Queries slower than OSRM CH (5.3 ms against 0.58 ms on the same Mac) | no witness search (more shortcuts), hash maps in the search, each shortcut unpacked with a Dijkstra | flat arrays for the labels, a stored middle node for each shortcut |
+| Queries slower than OSRM CH (1.38 ms against 0.58 ms on the same Mac) | no witness search (more shortcuts), hash maps in the search, each shortcut unpacked with a Dijkstra | flat arrays for the labels, a stored middle node for each shortcut |
 | More shortcuts than a graph partitioner would make | tile borders do not follow the roads | accepted for one tiling protocol |
 | Everything in memory today | the tile files are not made yet | M3 |
 | Not a full product | no snapping of points to roads, no turn instructions, no server, no browser yet | later milestones |
