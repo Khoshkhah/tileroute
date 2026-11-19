@@ -220,6 +220,23 @@ saves).
 tileroute build area.duckdb -o folder --by-tile --partition 16 --xyz-files --cch --metrics time,length,mix50 --middle-nodes
 ```
 
+**France** (Mac mini, the same 2,000 pairs, one thread, 3 metrics time, length and mix50 with `--middle-nodes`):
+
+| | No middle nodes (4 metrics) | `--middle-nodes` (3 metrics) |
+|---|---|---|
+| Build one unit at a time | 676 s, peak 9.2 GB | 656 s, peak 8.5 GB |
+| Each metric folder | 3.2 GB | 4.7 GB |
+| One query, time, warm / cold | 2.57 / 6.0 ms | **2.20 / 4.8 ms** |
+| One query, length, warm | 3.67 ms | **2.96 ms** |
+| One query, mix50, warm | 3.04 ms | **2.59 ms** |
+| Weighted query, 3 candidates in parallel | 7.7 ms | **3.4 ms** |
+| Costs equal to duckOSM's router (100 pairs) | 100 of 100 | 100 of 100 |
+
+On France the gain of the middle nodes is smaller than on Kentucky (15% against 30%): most of the time is the
+search, which reads 10.5 files for each query. The weighted query gains most (7.7 → 3.4 ms), because it takes the
+items from the route. With only time and length as candidates, the estimate for the 50/50 mix has a mean error of
+3.0% and a largest error of 13.4%; the third candidate is needed on France.
+
 ## Weights for each query: the best of a few routes
 
 A query can give its own weights: cost = w₁ · time + w₂ · length + … A customization for each query takes seconds,
