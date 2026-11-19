@@ -94,6 +94,8 @@ pub struct Hierarchy {
     pub inner: Vec<(u64, u64, u32)>,
     /// the inner nodes of the shortcuts (see `Arc`)
     paths: Vec<u32>,
+    /// for each zoom: the shortcut pairs that the witness search skipped
+    pub witnessed: Vec<usize>,
 }
 
 /// The labels of one search direction in flat arrays, used again by the next query of the same thread: a node has a
@@ -151,7 +153,10 @@ struct Search {
 }
 
 /// Make the hierarchy. `turns`: `(from, to, cost)`, each pair once; `level` and `cell` of each node.
-pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hierarchy {
+///
+/// `core`: the steps stop at this zoom; the nodes of level `core` and coarser stay as one graph (the core), and the
+/// query searches it in both directions like a plain Dijkstra. 0: the steps go to zoom 1.
+pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: u8) -> Hierarchy {
     let n = level.len();
     // all arcs that ever were (never removed), and the nodes with an arc into each node
     let mut arcs: Vec<HashMap<u32, Arc>> = vec![HashMap::new(); n];
@@ -168,14 +173,15 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
     let mut inner = vec![(0u64, 0u64, 0u32); top as usize + 1];
     // the inner nodes of all kept shortcuts, one after the other
     let mut paths: Vec<u32> = Vec::new();
-    for z in (1..=top).rev() {
+    let mut witnessed = vec![0usize; top as usize + 1];
+    for z in (core.max(0) + 1..=top).rev() {
         let mut sets: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
         for v in 0..n {
             if level[v] == z {
                 sets.entry(cell[v]).or_default().push(v as u32);
             }
         }
-        let made: Vec<(u64, Vec<(u32, u32, f64, Vec<u32>)>, f64)> = sets
+        let made: Vec<(u64, Vec<(u32, u32, f64, Vec<u32>, bool)>, f64)> = sets
             .par_iter()
             .map(|(&t, xs)| {
                 let t0 = std::time::Instant::now();
@@ -188,14 +194,17 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
             st.0 += 1;
             st.1 += secs;
             st.2 = st.2.max(secs);
-            for (u, w, c, p) in rows {
+            for (u, w, c, p, needed) in rows {
                 let k = p.len() as u32;
                 inner[z as usize].0 += 1;
                 inner[z as usize].1 += k as u64;
                 inner[z as usize].2 = inner[z as usize].2.max(k);
                 pairs.push((u, w, z, t));
                 shortcuts[z as usize] += 1;
-                let keep = arcs[u as usize].get(&w).is_none_or(|a| c < a.cost);
+                if !needed {
+                    witnessed[z as usize] += 1;
+                }
+                let keep = needed && arcs[u as usize].get(&w).is_none_or(|a| c < a.cost);
                 if keep {
                     let new = Arc { cost: c, start: paths.len() as u32, len: k };
                     paths.extend(p);
@@ -218,15 +227,17 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>) -> Hie
         for (&w, &a) in m {
             let u = u as u32;
             all.push((u, w, a));
-            if level[w as usize] <= level[u as usize] {
+            // the nodes of the core all count as the same level
+            let (lu, lw) = (level[u as usize].max(core), level[w as usize].max(core));
+            if lw <= lu {
                 up.push((u, w, a));
             }
-            if level[u as usize] <= level[w as usize] {
+            if lu <= lw {
                 down.push((w, u, a));
             }
         }
     }
-    Hierarchy { all: Csr::new(n, all), up: Csr::new(n, up), down: Csr::new(n, down), level, cell, shortcuts, steps, pairs, inner, paths }
+    Hierarchy { all: Csr::new(n, all), up: Csr::new(n, up), down: Csr::new(n, down), level, cell, shortcuts, steps, pairs, inner, paths, witnessed }
 }
 
 /// The shortcuts over the set `xs` (level `z`, cell `t`): for each node `u` with a turn into the set, a Dijkstra in the
@@ -241,7 +252,7 @@ fn contract(
     z: u8,
     t: u64,
     xs: &[u32],
-) -> Vec<(u32, u32, f64, Vec<u32>)> {
+) -> Vec<(u32, u32, f64, Vec<u32>, bool)> {
     let in_set = |v: u32| level[v as usize] == z && cell[v as usize] == t;
     let sources: BTreeSet<u32> =
         xs.iter().flat_map(|&x| inn[x as usize].iter().copied()).filter(|&u| alive[u as usize] && !in_set(u)).collect();
@@ -277,16 +288,60 @@ fn contract(
                 }
             }
         }
+        let witness = witness_search(arcs, alive, level, z, u, &to);
         for (w, (c, last)) in to {
             let mut p = vec![last];
             while dist[p.last().expect("not empty")].1 != u {
                 p.push(dist[p.last().expect("not empty")].1);
             }
             p.reverse();
-            out.push((u, w, c, p));
+            let needed = witness.get(&w).is_none_or(|&d| d > c);
+            out.push((u, w, c, p, needed));
         }
     }
     out
+}
+
+/// The settled nodes after which a witness search stops. A limit only keeps some shortcuts that are not needed; it never
+/// skips a needed one.
+// ponytail: a fixed limit; tune it per area if the preparation time or the shortcut count matters more
+const WITNESS_LIMIT: usize = 1000;
+
+/// The witness search from `u`: a Dijkstra on the nodes coarser than `z` (the nodes of all sets of this zoom are left
+/// out, because those sets run at the same time), up to the largest cost of `u`'s shortcuts. Returns the distance to each
+/// target that it reached.
+fn witness_search(arcs: &[HashMap<u32, Arc>], alive: &[bool], level: &[u8], z: u8, u: u32, to: &BTreeMap<u32, (f64, u32)>) -> HashMap<u32, f64> {
+    let limit = to.values().map(|x| x.0).fold(0.0, f64::max);
+    let ok = |v: u32| alive[v as usize] && level[v as usize] < z;
+    let mut dist: HashMap<u32, f64> = HashMap::new();
+    let mut heap = BinaryHeap::new();
+    dist.insert(u, 0.0);
+    heap.push(Key(0.0, u));
+    let mut settled = 0;
+    let mut found = HashMap::new();
+    while let Some(Key(d, v)) = heap.pop() {
+        if d > dist[&v] {
+            continue;
+        }
+        if d > limit || settled >= WITNESS_LIMIT {
+            break;
+        }
+        settled += 1;
+        if v != u && to.contains_key(&v) {
+            found.insert(v, d);
+        }
+        for (&w, a) in &arcs[v as usize] {
+            if !ok(w) {
+                continue;
+            }
+            let nd = d + a.cost;
+            if nd <= limit && dist.get(&w).is_none_or(|&e| nd < e) {
+                dist.insert(w, nd);
+                heap.push(Key(nd, w));
+            }
+        }
+    }
+    found
 }
 
 impl Hierarchy {

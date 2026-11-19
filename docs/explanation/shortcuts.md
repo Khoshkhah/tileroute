@@ -57,6 +57,49 @@ A shortcut with one end inside X (`x → w`, as in h3-routing-platform) is also 
 start cell in one step, but the number of shortcuts grows by about (nodes in X) × (border nodes) for each cell.
 [Comparison with h3-routing-platform](comparison.md) shows the difference.
 
+## Witness search: skip the shortcuts that are not needed
+
+Before a step adds the shortcut u → w (cost c, through X), it looks for a **witness**: another path from u to w that
+does not go through X and costs c or less. If a witness exists, the shortcut is not needed, because a query can use the
+witness, and the step does not add it.
+
+```
+          X (removed now)
+   u ──→ x1 ──→ x2 ──→ w        through X: 60 s
+   │                    ↑
+   └────→  y  ─────────┘        a witness, outside X: 55 s, so no shortcut u → w
+```
+
+| Rule | Why |
+|---|---|
+| The witness search is a Dijkstra from u, only on nodes that are **coarser than the zoom of the step** (not removed, not in any set of this zoom) | Two sets of the same zoom run at the same time. If X used a node of another set X′ as a witness, and X′ used a node of X, both could skip the same shortcut, and a route would be lost. |
+| It stops when its distance is more than the largest c of u's shortcuts, or after a fixed number of settled nodes | A limit only keeps a few shortcuts that are not needed; it never skips a needed one, so the routes stay exact |
+| A witness with the **same** cost is sufficient | the query finds a path of the same cost |
+
+The witness search makes the preparation longer and the hierarchy smaller: fewer arcs at the top, so a query opens fewer
+arcs. Which shortcuts are needed depends on the costs, so a rebuild with new costs runs the witness search again
+([Updates](updates.md)); the list of all pairs (`Hierarchy::pairs`) stays the list of candidates.
+
+**Result** (Kentucky, one thread): the witness search skips 7.6 million of 17.3 million shortcut pairs, but the arcs of
+the hierarchy go down only from 15.96 to 15.29 million, the arcs that a query opens from 581,951 to 536,028, and the
+query from 7.3 to 7.0 ms; the preparation takes 21 s in place of 15 s. At the top (zoom 6, 7) only the few hundred
+nodes of zoom 5 are coarser, so a witness is seldom found there, and the dense top stays.
+
+**A core (`--core Z`) does not help either.** If the steps stop at zoom Z and the coarser nodes stay as one graph, the
+query must search that graph with a plain Dijkstra, and the graph still holds the shortcuts that the finer steps made
+between its nodes:
+
+| Core (Kentucky) | Nodes settled | Arcs opened | One query |
+|---|---|---|---|
+| none | 4,181 | 536,028 | 6.9 ms |
+| zoom 6 | 4,227 | 528,114 | 6.9 ms |
+| zoom 8 | 7,166 | 765,559 | 11.6 ms |
+| zoom 10 | 23,617 | 909,539 | 26.4 ms |
+| zoom 12 | 90,320 | 1,284,001 | 60.0 ms |
+
+The cause of the dense top is the order: each set joins all its in-nodes to all its out-nodes, and the large tiles
+have many roads across their borders. A classic contraction hierarchy avoids this with an order by importance.
+
 ## Why the tiles of one zoom run in parallel
 
 Two sets X of the same zoom have no common node and no arc between them: their road edges are in different tiles and
