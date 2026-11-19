@@ -150,6 +150,8 @@ struct Search {
     tiles: std::collections::HashSet<u64>,
     settled: usize,
     relaxed: usize,
+    /// the arcs opened from the settled nodes of each level
+    by_level: [usize; 32],
 }
 
 /// Make the hierarchy. `turns`: `(from, to, cost)`, each pair once; `level` and `cell` of each node.
@@ -352,7 +354,7 @@ impl Hierarchy {
         let mut label = LABELS.with(|l| l.borrow_mut().take()).unwrap_or_else(|| [Labels::new(), Labels::new()]);
         label[0].start(n);
         label[1].start(n);
-        let mut r = Search { label, best: f64::INFINITY, meet: u32::MAX, tiles: Default::default(), settled: 0, relaxed: 0 };
+        let mut r = Search { label, best: f64::INFINITY, meet: u32::MAX, tiles: Default::default(), settled: 0, relaxed: 0, by_level: [0; 32] };
         let mut heap: [BinaryHeap<Key>; 2] = [BinaryHeap::new(), BinaryHeap::new()];
         r.label[0].set(s, 0.0, u32::MAX);
         r.label[1].set(t, 0.0, u32::MAX);
@@ -390,6 +392,7 @@ impl Hierarchy {
             }
             for (w, a) in go.of(v) {
                 r.relaxed += 1;
+                r.by_level[self.level[v as usize] as usize] += 1;
                 let nd = d + a.cost;
                 if r.label[dir].get(w).is_none_or(|(e, _)| nd < e) {
                     r.label[dir].set(w, nd, v);
@@ -502,6 +505,19 @@ impl Hierarchy {
     pub fn query_bytes(&self) -> usize {
         let csr = |c: &Csr| c.off.len() * 4 + c.other.len() * 4 + c.arc.len() * std::mem::size_of::<Arc>();
         csr(&self.all) + csr(&self.up) + csr(&self.down) + self.level.len() + self.cell.len() * 8 + self.paths.len() * 4
+    }
+
+    /// The arcs opened from the settled nodes of each level, summed over the queries `pairs`.
+    pub fn arcs_by_level(&self, pairs: &[(u32, u32)]) -> [usize; 32] {
+        let mut sum = [0usize; 32];
+        for &(s, t) in pairs {
+            let r = self.search(s, t, false, 0);
+            for (a, b) in sum.iter_mut().zip(r.by_level.iter()) {
+                *a += b;
+            }
+            Self::done(r);
+        }
+        sum
     }
 
     pub fn n_arcs(&self) -> usize {

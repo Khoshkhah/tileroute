@@ -121,6 +121,10 @@ fn run() -> Result<(), String> {
     let mean = |f: &(dyn Fn(u32, u32) -> usize + Sync)| pairs.par_iter().map(|&(s, t)| f(s, t)).sum::<usize>() as f64 / pairs.len().max(1) as f64;
     println!("tiles per query: {:.1}", mean(&|s, t| h.route_stats(s, t).1));
     if args.iter().any(|a| a == "--profile") {
+        let by = h.arcs_by_level(&pairs);
+        let all: usize = by.iter().sum();
+        let line: Vec<String> = by.iter().enumerate().filter(|(_, &x)| x > 0).map(|(z, &x)| format!("{z}:{:.0}%", x as f64 * 100.0 / all as f64)).collect();
+        println!("arcs opened by the level of the settled node: {}", line.join(" "));
         let rows: Vec<(usize, f64, f64, usize, usize)> = pairs.iter().map(|&(s, t)| h.profile(s, t)).collect();
         let k = rows.len().max(1) as f64;
         let sum = |f: &dyn Fn(&(usize, f64, f64, usize, usize)) -> f64| rows.iter().map(f).sum::<f64>() / k;
