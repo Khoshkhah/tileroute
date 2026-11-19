@@ -166,6 +166,9 @@ fn run() -> Result<(), String> {
             sum(&|r| r.3 as f64)
         );
     }
+    if args.iter().any(|a| a == "--cch") {
+        cch_check(&net, &pairs, &ours);
+    }
     let ids = &net.graph.ids;
     if let Some(dir) = args.iter().position(|a| a == "--files").and_then(|i| args.get(i + 1)) {
         // the routes from the tile files must equal the routes in memory: the same cost, and a path of that cost
@@ -438,4 +441,59 @@ fn route_files(args: &[String]) -> Result<(), String> {
     }
     println!("files mapped: {}; peak memory of this process: {:.1} MB ({})", store.mapped.load(std::sync::atomic::Ordering::Relaxed), disk::peak_rss() as f64 / 1e6, proc_memory());
     Ok(())
+}
+
+/// `check --cch`: the structure with no costs and its customization (`tileroute::cch`), against the routes of the
+/// hierarchy: the same cost for each pair, and a path of that cost.
+fn cch_check(net: &load::Network, pairs: &[(u32, u32)], ours: &[Option<(f64, Vec<u32>)>]) {
+    use tileroute::cch::Cch;
+    let n = net.graph.n_nodes();
+    let t = Instant::now();
+    let c = Cch::new(n, net.turns.iter().map(|a| (a.0, a.1)), &net.level, &net.cell);
+    let t_struct = t.elapsed().as_secs_f64();
+    let m = c.customize(&net.turns, !std::env::args().any(|a| a == "--no-reduce"));
+    println!(
+        "cch: structure {:.2} s ({} edges, elimination tree depth {}); customization: triangles {:.2} s, arc reduction {:.2} s ({} -> {} search arcs)",
+        t_struct,
+        c.n_edges(),
+        c.max_depth(),
+        m.times.0,
+        m.times.1,
+        m.before,
+        m.n_search_arcs()
+    );
+    let weight: std::collections::HashMap<(u32, u32), f64> = net.turns.iter().map(|a| ((a.0, a.1), a.2)).collect();
+    let (mut same, mut tie, mut wrong) = (0usize, 0usize, 0usize);
+    let (mut settled, mut relaxed) = (0usize, 0usize);
+    for (&(s, t), o) in pairs.iter().zip(ours) {
+        let (r, st) = m.route(s, t);
+        settled += st.settled;
+        relaxed += st.relaxed;
+        match (&r, o) {
+            (None, None) => same += 1,
+            (Some((d, p)), Some((od, op))) if d == od => {
+                let own = p.windows(2).map(|w| weight.get(&(w[0], w[1])).copied()).try_fold(0.0, |s, c| c.map(|c| s + c));
+                if own != Some(*d) {
+                    wrong += 1;
+                } else if p == op {
+                    same += 1;
+                } else {
+                    tie += 1;
+                }
+            }
+            _ => wrong += 1,
+        }
+    }
+    let k = pairs.len().max(1);
+    let t = Instant::now();
+    for &(s, t) in pairs {
+        std::hint::black_box(m.route(s, t));
+    }
+    println!(
+        "cch against the hierarchy: {} pairs | same {same} | tie {tie} | wrong {wrong} | {:.3} ms per query (one thread), {} settled, {} arcs opened",
+        pairs.len(),
+        t.elapsed().as_secs_f64() / k as f64 * 1e3,
+        settled / k,
+        relaxed / k
+    );
 }
