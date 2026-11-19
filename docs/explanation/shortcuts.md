@@ -100,6 +100,20 @@ between its nodes:
 The cause of the dense top is the order: each set joins all its in-nodes to all its out-nodes, and the large tiles
 have many roads across their borders. A classic contraction hierarchy avoids this with an order by importance.
 
+**A classic order for the top (`--top-ch Z`) does not help either.** The tile steps run down to zoom Z + 1; then the
+nodes of zoom Z and coarser are removed one at a time in the order of importance (as OSRM and GraphHopper do), in
+parallel rounds of nodes that do not touch each other:
+
+| Classic order from (Kentucky) | Preparation | Arcs opened | One query (one thread) |
+|---|---|---|---|
+| none (tile order only) | 21 s | 543,097 | 2.33 ms |
+| zoom 6 (1,333 nodes) | 53 s | 455,320 | 1.95 ms |
+| zoom 8 (6,581 nodes) | 758 s | 502,553 | 1.98 ms |
+
+The top nodes are already joined by many shortcuts from the finer tile steps, so a classic order on them makes as many
+shortcuts again. The routes stay exact (Monaco: all pairs), but the gain is small and the preparation is much longer.
+So the tile order stays for all levels.
+
 ## Why the tiles of one zoom run in parallel
 
 Two sets X of the same zoom have no common node and no arc between them: their road edges are in different tiles and

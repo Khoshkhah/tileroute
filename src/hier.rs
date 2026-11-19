@@ -176,7 +176,7 @@ struct Search {
 ///
 /// `core`: the steps stop at this zoom; the nodes of level `core` and coarser stay as one graph (the core), and the
 /// query searches it in both directions like a plain Dijkstra. 0: the steps go to zoom 1.
-pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: u8, renumber: bool) -> Hierarchy {
+pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: u8, renumber: bool, core_ch: bool) -> Hierarchy {
     let n = level.len();
     // all arcs that ever were (never removed), and the nodes with an arc into each node
     let mut arcs: Vec<HashMap<u32, Arc>> = vec![HashMap::new(); n];
@@ -240,6 +240,19 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: 
             }
         }
     }
+    // the core: with `core_ch`, a classic contraction hierarchy (one node at a time, by importance) gives each core node
+    // its own rank; without it, all core nodes count as the same level
+    let rank: HashMap<u32, u32> = if core_ch && core > 0 {
+        let nodes: Vec<u32> = (0..n as u32).filter(|&v| alive[v as usize]).collect();
+        contract_core(&mut arcs, &mut inn, &mut alive, &nodes, &mut paths)
+    } else {
+        HashMap::new()
+    };
+    // the place of a node in the hierarchy: larger is higher; equal only for nodes of one level outside the core
+    let ord = |v: u32| -> u64 {
+        let major = 255 - level[v as usize].max(core) as u64;
+        (major << 32) | rank.get(&v).map_or(0, |&r| r as u64 + 1)
+    };
     let mut all = Vec::new();
     let mut up = Vec::new();
     let mut down = Vec::new();
@@ -247,12 +260,11 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: 
         for (&w, &a) in m {
             let u = u as u32;
             all.push((u, w, a));
-            // the nodes of the core all count as the same level
-            let (lu, lw) = (level[u as usize].max(core), level[w as usize].max(core));
-            if lw <= lu {
+            let (ou, ow) = (ord(u), ord(w));
+            if ow >= ou {
                 up.push((u, w, a));
             }
-            if lu <= lw {
+            if ou >= ow {
                 down.push((w, u, a));
             }
         }
@@ -352,6 +364,119 @@ fn contract(
     }
     out
 }
+
+/// The classic contraction of the core: one node at a time in the order of importance (the shortcuts that removing it
+/// can need minus the arcs that it removes, plus its removed neighbours). To use all cores, each round removes a set of
+/// nodes that do not touch each other: each node whose importance is smaller than that of all its neighbours. The
+/// witness searches of one round do not use the nodes of that round. Returns the rank of each core node.
+fn contract_core(arcs: &mut [HashMap<u32, Arc>], inn: &mut [Vec<u32>], alive: &mut [bool], nodes: &[u32], paths: &mut Vec<u32>) -> HashMap<u32, u32> {
+    let n = alive.len();
+    let mut removed_nb = vec![0i64; n];
+    let mut rank = HashMap::new();
+    let mut left: Vec<u32> = nodes.to_vec();
+    let neighbours = |arcs: &[HashMap<u32, Arc>], inn: &[Vec<u32>], alive: &[bool], v: u32| -> (Vec<(u32, f64)>, Vec<(u32, f64)>) {
+        let mut ins: Vec<(u32, f64)> = inn[v as usize]
+            .iter()
+            .filter(|&&u| u != v && alive[u as usize])
+            .filter_map(|&u| arcs[u as usize].get(&v).map(|a| (u, a.cost)))
+            .collect();
+        ins.sort_unstable_by_key(|x| x.0);
+        ins.dedup_by_key(|x| x.0);
+        let outs: Vec<(u32, f64)> = arcs[v as usize].iter().filter(|(&w, _)| w != v && alive[w as usize]).map(|(&w, a)| (w, a.cost)).collect();
+        (ins, outs)
+    };
+    while !left.is_empty() {
+        let prio: HashMap<u32, i64> = left
+            .par_iter()
+            .map(|&v| {
+                let (i, o) = neighbours(arcs, inn, alive, v);
+                let (i, o) = (i.len() as i64, o.len() as i64);
+                (v, i * o - i - o + 2 * removed_nb[v as usize])
+            })
+            .collect();
+        let key = |v: u32| (prio[&v], v);
+        // the nodes of this round: smaller than all their neighbours
+        let round: Vec<u32> = left
+            .par_iter()
+            .copied()
+            .filter(|&v| {
+                let (i, o) = neighbours(arcs, inn, alive, v);
+                i.iter().chain(o.iter()).all(|&(x, _)| key(v) < key(x))
+            })
+            .collect();
+        let mut usable = alive.to_vec();
+        for &v in &round {
+            usable[v as usize] = false;
+        }
+        let need: Vec<(u32, Vec<(u32, u32, f64)>)> = round
+            .par_iter()
+            .map(|&v| {
+                let (ins, outs) = neighbours(arcs, inn, alive, v);
+                let mut need = Vec::new();
+                for &(u, cu) in &ins {
+                    let targets: Vec<(u32, f64)> = outs.iter().filter(|&&(w, _)| w != u).map(|&(w, cw)| (w, cu + cw)).collect();
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    // a witness: a path from u to w on the usable nodes (not v, not another node of this round)
+                    let limit = targets.iter().map(|x| x.1).fold(0.0, f64::max);
+                    let mut dist: HashMap<u32, f64> = HashMap::new();
+                    let mut heap = BinaryHeap::new();
+                    dist.insert(u, 0.0);
+                    heap.push(Key(0.0, u));
+                    let mut settled = 0;
+                    while let Some(Key(d, x)) = heap.pop() {
+                        if d > dist[&x] {
+                            continue;
+                        }
+                        settled += 1;
+                        if d > limit || settled > CORE_WITNESS_LIMIT {
+                            break;
+                        }
+                        for (&y, a) in &arcs[x as usize] {
+                            if !usable[y as usize] {
+                                continue;
+                            }
+                            let nd = d + a.cost;
+                            if nd <= limit && dist.get(&y).is_none_or(|&e| nd < e) {
+                                dist.insert(y, nd);
+                                heap.push(Key(nd, y));
+                            }
+                        }
+                    }
+                    for (w, c) in targets {
+                        if dist.get(&w).is_none_or(|&d| d > c) {
+                            need.push((u, w, c));
+                        }
+                    }
+                }
+                (v, need)
+            })
+            .collect();
+        for (v, list) in need {
+            for (u, w, c) in list {
+                if arcs[u as usize].get(&w).is_none_or(|a| c < a.cost) {
+                    let new = Arc { cost: c, start: paths.len() as u32, len: 1 };
+                    paths.push(v);
+                    if arcs[u as usize].insert(w, new).is_none() {
+                        inn[w as usize].push(u);
+                    }
+                }
+            }
+            let (i, o) = neighbours(arcs, inn, alive, v);
+            for (x, _) in i.into_iter().chain(o) {
+                removed_nb[x as usize] += 1;
+            }
+            alive[v as usize] = false;
+            rank.insert(v, rank.len() as u32);
+        }
+        left.retain(|&v| alive[v as usize]);
+    }
+    rank
+}
+
+/// The settled nodes after which a witness search of the core contraction stops.
+const CORE_WITNESS_LIMIT: usize = 100;
 
 /// The settled nodes after which a witness search stops. A limit only keeps some shortcuts that are not needed; it never
 /// skips a needed one.

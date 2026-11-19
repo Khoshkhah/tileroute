@@ -42,7 +42,14 @@ fn run() -> Result<(), String> {
     let t = Instant::now();
     let core: u8 = opt("--core", "0").parse().map_err(|e| format!("--core: {e}"))?;
     let renumber = !args.iter().any(|a| a == "--no-renumber");
-    let h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone(), core, renumber);
+    // --top-ch Z: the tile steps down to zoom Z + 1, then a classic contraction hierarchy for the top (zoom Z and coarser)
+    let top_ch: u8 = opt("--top-ch", "0").parse().map_err(|e| format!("--top-ch: {e}"))?;
+    let (core, core_ch) = if top_ch > 0 { (top_ch, true) } else { (core, false) };
+    let t_prep = Instant::now();
+    let h = hier::prepare(&net.turns, net.level.clone(), net.cell.clone(), core, renumber, core_ch);
+    if core_ch {
+        println!("top: classic contraction hierarchy for zoom {top_ch} and coarser; preparation {:.2} s", t_prep.elapsed().as_secs_f64());
+    }
     println!("shortcuts: {} pairs made, {} arcs in all, {:.3} s", h.shortcuts.iter().sum::<usize>(), h.n_arcs(), t.elapsed().as_secs_f64());
     for (z, c) in h.shortcuts.iter().enumerate() {
         let nodes = net.level.iter().filter(|&&l| l as usize == z).count();
