@@ -199,6 +199,44 @@ costs equal to the files (metric time). All 4 metrics find a route for the same 
 - **Next for speed:** f32 costs next to the node numbers, the middle nodes back as an option, and fewer files for
   each query.
 
+## Faster queries: the middle nodes as an option
+
+Kentucky, from the files, the same 10,000 pairs, one thread. Half of the time of a query (0.29 of 0.56 ms) was the
+unpack: without middle nodes, it searches the common lower neighbours of each edge.
+
+| | No middle nodes | `--middle-nodes` |
+|---|---|---|
+| Each metric folder | 288 MB | 430 MB |
+| One query, metric time | 0.59 ms | **0.40 to 0.48 ms** |
+| One query, metric length | 0.86 ms | **0.55 ms** |
+| Weighted query, 3 candidates in parallel (the items now come with the route) | 1.43 ms | **0.66 ms** |
+| Routes from the files = routes in memory | 2,000 of 2,000 | 2,000 of 2,000 |
+
+Tested and not kept: a shorter search of the common lower neighbours (no gain: the cost is the lookups of each
+candidate, not the walk), and stall-on-demand in the search (0.44 against 0.40 ms: the check costs more than it
+saves).
+
+```bash
+tileroute build area.duckdb -o folder --by-tile --partition 16 --xyz-files --cch --metrics time,length,mix50 --middle-nodes
+```
+
+**France** (Mac mini, the same 2,000 pairs, one thread, 3 metrics time, length and mix50 with `--middle-nodes`):
+
+| | No middle nodes (4 metrics) | `--middle-nodes` (3 metrics) |
+|---|---|---|
+| Build one unit at a time | 676 s, peak 9.2 GB | 656 s, peak 8.5 GB |
+| Each metric folder | 3.2 GB | 4.7 GB |
+| One query, time, warm / cold | 2.57 / 6.0 ms | **2.20 / 4.8 ms** |
+| One query, length, warm | 3.67 ms | **2.96 ms** |
+| One query, mix50, warm | 3.04 ms | **2.59 ms** |
+| Weighted query, 3 candidates in parallel | 7.7 ms | **3.4 ms** |
+| Costs equal to duckOSM's router (100 pairs) | 100 of 100 | 100 of 100 |
+
+On France the gain of the middle nodes is smaller than on Kentucky (15% against 30%): most of the time is the
+search, which reads 10.5 files for each query. The weighted query gains most (7.7 → 3.4 ms), because it takes the
+items from the route. With only time and length as candidates, the estimate for the 50/50 mix has a mean error of
+3.0% and a largest error of 13.4%; the third candidate is needed on France.
+
 ## Weights for each query: the best of a few routes
 
 A query can give its own weights: cost = w₁ · time + w₂ · length + … A customization for each query takes seconds,

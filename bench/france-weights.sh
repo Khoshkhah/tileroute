@@ -12,6 +12,8 @@ PBF=$HOME/remote/data/france-latest.osm.pbf
 TR=src-tr/target/release/tileroute
 DUCKOSM=$HOME/remote/no-osmium-gdal/rust/target/release/duckosm
 METRICS=${METRICS:-time,length,mix50,mix30}
+EXACT=${EXACT:-mix30}  # the exact mix for the error of the weighted query (it must be in METRICS)
+MIDDLE=${MIDDLE:-}  # "--middle-nodes": a faster unpack, 50% more disk for each metric
 step() { echo "== $(date +%H:%M:%S) $* (free: $(df -g / | awk 'NR==2{print $4}') GB)"; }
 measure() {  # measure NAME CMD...: wall time and peak memory, under the disk guard
   local name=$1; shift
@@ -23,7 +25,7 @@ measure duckosm "$DUCKOSM" "$PBF" -o work --name france -f duckdb -m driving --n
 measure slim $TR slim work/france.duckdb work/france-slim.duckdb
 rm -f work/france.duckdb
 step "build: structure and metrics $METRICS, unit by unit"
-measure cch-build $TR build work/france-slim.duckdb -o work/cch --by-tile --partition 16 --xyz-files --cch --metrics "$METRICS"
+measure cch-build $TR build work/france-slim.duckdb -o work/cch --by-tile --partition 16 --xyz-files --cch --metrics "$METRICS" $MIDDLE
 cat work/cch-build.log | tee -a results/prepare.txt
 du -sh work/cch/* | tee -a results/prepare.txt
 for m in ${METRICS//,/ }; do
@@ -31,8 +33,8 @@ for m in ${METRICS//,/ }; do
   $TR route work/cch --metric "$m" --pairs-file pairs-in.csv --write "results/route-$m.csv" 2>&1 | tee -a results/queries.txt
 done
 step "weighted query"
-$TR weigh work/cch --pairs-file pairs-in.csv --candidates time,length,mix50 --exact mix30 2>&1 | tee -a results/weigh.txt
-$TR weigh work/cch --pairs-file pairs-in.csv --candidates time,length --exact mix30 2>&1 | grep "^l =" | tee -a results/weigh.txt
+$TR weigh work/cch --pairs-file pairs-in.csv --candidates time,length,mix50 --exact "$EXACT" 2>&1 | tee -a results/weigh.txt
+$TR weigh work/cch --pairs-file pairs-in.csv --candidates time,length --exact "$EXACT" 2>&1 | tee -a results/weigh.txt
 step "reference: 100 pairs with duckOSM's router"
 $TR reference work/france-slim.duckdb pairs-in.csv results/reference.csv --max 100 2>&1 | tee -a results/reference.txt
 python3 - <<'PY' | tee -a results/reference.txt
