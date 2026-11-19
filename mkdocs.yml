@@ -55,6 +55,7 @@ nav:
       - Tiles and levels: explanation/levels.md
       - Shortcuts: explanation/shortcuts.md
       - The shortest path: explanation/query.md
+      - Tile files: explanation/tile-files.md
       - The top-down phase: explanation/top-down.md
       - Updates (new costs): explanation/updates.md
       - Weights (many items): explanation/weights.md

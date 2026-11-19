@@ -1,7 +1,8 @@
 # Tile files
 
 `tileroute build` writes the hierarchy of shortcuts to files on disk, grouped by XYZ tile. `tileroute route` answers
-queries from these files only. A query maps a file only when its search gets to a node in that file.
+queries from these files only. A query maps a file only when its search gets to a node in that file. The approach
+is in [Tile files (explanation)](../explanation/tile-files.md).
 
 ## The folder
 
