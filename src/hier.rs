@@ -73,6 +73,72 @@ impl Fast {
     }
 }
 
+/// Arc reduction of a search graph: remove the arc `u -> w` (cost c) when another path from u to w in the same search
+/// graph costs c or less. A search then finds that path in place of the arc, so the routes stay exact; the unpack data
+/// (`Hierarchy::all`) keeps every arc.
+fn reduce(g: Fast) -> Fast {
+    let n = g.off.len() - 1;
+    let keep: Vec<Vec<bool>> = (0..n as u32)
+        .into_par_iter()
+        .map(|u| {
+            let arcs = g.of(u);
+            if arcs.len() < 2 {
+                return vec![true; arcs.len()];
+            }
+            let limit = arcs.iter().map(|a| a.0).fold(0.0, f64::max);
+            // a Dijkstra from u: dist and the first arc (its index in u's list) on the best path
+            let mut dist: HashMap<u32, (f64, usize)> = HashMap::new();
+            let mut heap = BinaryHeap::new();
+            for (k, &(c, w)) in arcs.iter().enumerate() {
+                if w != u && dist.get(&w).is_none_or(|&(d, _)| c < d) {
+                    dist.insert(w, (c, k));
+                    heap.push(Key(c, w));
+                }
+            }
+            let mut settled = 0;
+            // the cheapest cost to each node over a path of two or more arcs
+            let mut other: HashMap<u32, f64> = HashMap::new();
+            while let Some(Key(d, x)) = heap.pop() {
+                if d > dist[&x].0 {
+                    continue;
+                }
+                settled += 1;
+                if settled > REDUCE_LIMIT {
+                    break;
+                }
+                for &(c, y) in g.of(x) {
+                    let nd = d + c;
+                    if nd > limit || y == u {
+                        continue;
+                    }
+                    if other.get(&y).is_none_or(|&e| nd < e) {
+                        other.insert(y, nd);
+                    }
+                    if dist.get(&y).is_none_or(|&(e, _)| nd < e) {
+                        dist.insert(y, (nd, usize::MAX));
+                        heap.push(Key(nd, y));
+                    }
+                }
+            }
+            arcs.iter().map(|&(c, w)| other.get(&w).is_none_or(|&d| d > c)).collect()
+        })
+        .collect();
+    let mut off = vec![0u32; n + 1];
+    let mut arc = Vec::new();
+    for u in 0..n {
+        for (a, &k) in g.of(u as u32).iter().zip(&keep[u]) {
+            if k {
+                arc.push(*a);
+            }
+        }
+        off[u + 1] = arc.len() as u32;
+    }
+    Fast { off, arc }
+}
+
+/// The settled nodes after which the search of the arc reduction stops (a limit only keeps some arcs).
+const REDUCE_LIMIT: usize = 2000;
+
 /// A heap entry, the smallest distance first; a tie takes the smaller node.
 #[derive(PartialEq)]
 struct Key(f64, u32);
@@ -290,8 +356,8 @@ pub fn prepare(turns: &[(u32, u32, f64)], level: Vec<u8>, cell: Vec<u64>, core: 
     let cell: Vec<u64> = order.iter().map(|&v| cell[v as usize]).collect();
     Hierarchy {
         all: Csr::new(n, all),
-        up: Fast::new(&Csr::new(n, up)),
-        down: Fast::new(&Csr::new(n, down)),
+        up: reduce(Fast::new(&Csr::new(n, up))),
+        down: reduce(Fast::new(&Csr::new(n, down))),
         level,
         cell,
         shortcuts,

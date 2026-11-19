@@ -35,14 +35,28 @@ proof of a contraction hierarchy.
 
 ## Unpack
 
-The path of the search can have shortcuts. tileroute writes each shortcut `u → w` (made at zoom `z` for tile `T`) as
-its nodes again:
+The path of the search can have shortcuts. Each shortcut `u → w` saves its **inner nodes**: the nodes of the removed
+set X on its path (on average 1.7, at most 15 on Kentucky). The unpack replaces the shortcut with `u → x1 → … → w`.
+Each step of that list is an arc of the input graph or a finer shortcut, which is unpacked in the same way, down to the
+arcs of the input graph. This needs no search, only lookups.
 
-1. Run the same Dijkstra as the step that made it: from `u`, only on the nodes of level `z` and cell `T`, to `w`.
-2. The result is a path of arcs and finer shortcuts. Unpack each finer shortcut in the same way.
+The saved list stays valid: the arcs to the nodes of a set never change after its step, because all later steps only
+add shortcuts between coarser nodes. The unpacked path has exactly the cost of the shortcut, because each sum is exact
+([The graph](graph.md#the-cost-of-a-path)). The output is the list of duckOSM `edge_id`s.
 
-The unpacked path has exactly the cost of the shortcut, because each sum is exact ([The graph](graph.md#the-cost-of-a-path)).
-The output is the list of duckOSM `edge_id`s.
+## How the query is made fast
+
+| Part | What it does | Kentucky, one query |
+|---|---|---|
+| First version | labels in hash maps, node numbers in the order of the database rows, unpack with a Dijkstra | about 10.5 ms |
+| Saved inner paths | the unpack reads the saved nodes, with no search | 7.3 ms |
+| Node numbers by level | the top nodes, which a query reads most, are together in memory | 4.0 ms |
+| One array of (cost, node) for each search graph | a search reads one stream of memory for the arcs of a node | 3.2 ms |
+| No stall-on-demand | its extra reads cost more than it saves on this hierarchy | 2.35 ms |
+| Arc reduction ([Shortcuts](shortcuts.md#arc-reduction-fewer-arcs-for-the-search)) | arcs that another path in the same search graph makes not needed are removed from the search graphs | **1.09 ms** |
+
+All times: one thread, the WSL PC, 2,000 pairs. The labels of a search are flat arrays that the next query of the same
+thread uses again; a stamp marks which entries belong to the current query.
 
 ## Equal to duckOSM's router
 

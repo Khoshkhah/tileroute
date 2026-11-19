@@ -69,7 +69,8 @@ thread, the same algorithm and the same arcs):
 | Node numbers in the order of the database rows | 7.3 ms |
 | Node numbers by level, the top first (the nodes that a query reads most are together) | 4.0 ms |
 | + the search arcs as one array of (cost, node) | 3.2 ms |
-| + no stall-on-demand (its extra reads cost more than they save) | **2.35 ms** |
+| + no stall-on-demand (its extra reads cost more than they save) | 2.35 ms |
+| + arc reduction (remove search arcs that another path makes not needed: 543,097 → 180,380 arcs opened) | **1.09 ms** |
 
 The query data in memory went down to 802 MB.
 
@@ -127,7 +128,7 @@ These fixes are milestone M2c of the [Plan](../plan.md).
 
 | Weak point | Reason | Possible fix |
 |---|---|---|
-| Queries slower than OSRM CH (1.38 ms against 0.58 ms on the same Mac) | no witness search (more shortcuts), hash maps in the search, each shortcut unpacked with a Dijkstra | flat arrays for the labels, a stored middle node for each shortcut |
+| Queries slower than OSRM CH (Mac mini: 1.38 ms before the arc reduction, against 0.58 ms) | the dense top of the hierarchy (many arcs for each top node) | done: saved paths, memory layout, witness search, arc reduction (1.09 ms on the WSL PC); the new Mac number is not measured yet |
 | More shortcuts than a graph partitioner would make | tile borders do not follow the roads | accepted for one tiling protocol |
 | A query reads 8.8 MB of tile files (Kentucky) | the arcs of the low levels are large, and each arc is stored three times | a smaller arc, one arc list ([Tile files](../reference/tile-files.md#next-steps)) |
 | Not a full product | no snapping of points to roads, no turn instructions, no server, no browser yet | later milestones |
