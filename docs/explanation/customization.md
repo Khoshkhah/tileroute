@@ -68,7 +68,7 @@ cost(z → y) = min(cost(z → y), cost(z → x) + cost(x → y))
 The edge keeps the x of its best cost. A shortest path between two nodes of higher rank than x that goes through x
 is found this way, because the costs of the edges to x are final before x is used. After this, the
 [arc reduction](shortcuts.md#arc-reduction-fewer-arcs-for-the-search) removes the search arcs that these costs do not
-need (a "perfect customization" removes all of them; the arc reduction removes most).
+need. Since then, the perfect customization makes the mask ([The mask from the perfect customization](#the-mask-from-the-perfect-customization)).
 
 **4. Query.** The same bidirectional search up the ranks as in a contraction hierarchy. The unpack uses the x of each
 edge: the arc y → z with x is y → x, then x → z.
@@ -236,6 +236,26 @@ On France the gain of the middle nodes is smaller than on Kentucky (15% against 
 search, which reads 10.5 files for each query. The weighted query gains most (7.7 → 3.4 ms), because it takes the
 items from the route. With only time and length as candidates, the estimate for the 50/50 mix has a mean error of
 3.0% and a largest error of 13.4%; the third candidate is needed on France.
+
+## The mask from the perfect customization
+
+The mask first came from the arc reduction: a search arc is removed when a path up the ranks costs the same or less.
+Now it comes from the **perfect customization**: from the highest node down, each edge gets its exact distance
+through the triangles above it (upper triangles) and between its two ends (intermediate triangles); an edge whose
+cost is above its exact distance is not needed by any search, so its bit is 0. The costs and the middle nodes do not
+change, so the unpack is the same.
+
+| Kentucky | Arc reduction | Perfect customization |
+|---|---|---|
+| Nodes settled by one query (in memory) | 572 | 510 |
+| Arcs opened by one query (in memory) | 15,644 | **10,101** |
+| One query from the files, time (the same machine, one after the other) | 0.45 to 0.51 ms | **0.41 ms** |
+| One query from the files, length | 0.61 to 0.65 ms | 0.62 ms |
+| Mask and files in the build one unit at a time | 14 s | 25 s |
+| Routes | 2,000 of 2,000 | 2,000 of 2,000; 300 of 300 equal to duckOSM's router |
+
+The search opens a third fewer arcs, but the time falls less: the query still reads each edge of a row and checks
+its bit, so a masked edge still costs a little.
 
 ## Weights for each query: the best of a few routes
 

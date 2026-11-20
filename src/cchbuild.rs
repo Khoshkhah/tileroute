@@ -8,13 +8,12 @@
 //! 4. For each unit: the structure of its nodes (the elimination), and the customization of all metrics. A fill edge
 //!    or a triangle cost between two top nodes goes to the top.
 //! 5. The top: its structure and its customization, with the fill edges and the triangle costs of all units.
-//! 6. For each unit: the arc reduction together with the top (the mask), and the lower neighbours. Each node goes to the
+//! 6. For each unit: the perfect customization together with the top (the mask), and the lower neighbours. Each node goes to the
 //!    bucket of its file. Then each file is written from its bucket.
 
 use crate::bytile::read_bucket;
 use crate::cch::Cch;
 use crate::cchdisk::{write_file, FileData};
-use crate::hier::{reduce, reduce_from, Fast};
 use crate::{disk, load, tile};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -483,33 +482,11 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
         })
         .collect();
     drop((top_fill, top_tri));
-    // the search graphs of the top for each metric (rows by node number; the top numbers are 0..ntop)
-    let top_rows = |m: usize, dir: usize| -> Vec<Vec<(f64, u32)>> {
-        let mut rows = vec![Vec::new(); ntop];
-        for r in 0..ntop as u32 {
-            let v = top.order[r as usize];
-            for e in top.row(r) {
-                let c = if dir == 0 { top_m[m].up[e] } else { top_m[m].down[e] };
-                if c.is_finite() {
-                    rows[v as usize].push((c, top.order[top.up[e] as usize]));
-                }
-            }
-        }
-        rows
-    };
-    let flat = |rows: &[Vec<(f64, u32)>]| -> Fast {
-        let mut off = vec![0u32];
-        let mut arc = Vec::new();
-        for r in rows {
-            arc.extend_from_slice(r);
-            off.push(arc.len() as u32);
-        }
-        Fast { off, arc }
-    };
-    let top_search: Vec<[Vec<Vec<(f64, u32)>>; 2]> = (0..nm).map(|m| [top_rows(m, 0), top_rows(m, 1)]).collect();
+    // the exact distance of each top edge (the perfect customization of the top)
+    let top_exact: Vec<(Vec<f64>, Vec<f64>)> = (0..nm).into_par_iter().map(|m| top.perfect(&top_m[m].up, &top_m[m].down)).collect();
     times.push(("top: structure and customization", t.elapsed().as_secs_f64()));
 
-    // 6. each unit: the mask (arc reduction together with the top), the lower neighbours, the nodes into the file buckets
+    // 6. each unit: the mask (perfect customization with the top), the lower neighbours, the nodes into the file buckets
     let t = std::time::Instant::now();
     let part = |key: u64| tmp.join(format!("file_{key}.bin"));
     let mut parts: HashMap<u64, BufWriter<File>> = HashMap::new();
@@ -518,27 +495,66 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
     let item = |v: u32| [time[v as usize], len[v as usize]];
     for (key, range) in &units {
         let vs = &unit_nodes[range.clone()];
-        let k = vs.len();
         let rows = read_rows(&unit_file(*key), nm).map_err(err)?;
         std::fs::remove_file(unit_file(*key)).map_err(err)?;
-        // local space: the top 0..ntop, then the unit by rank
-        let li: HashMap<u32, usize> = vs.iter().enumerate().map(|(i, &v)| (v, ntop + i)).collect();
-        let loc = |g: u32| -> usize { if (g as usize) < ntop { g as usize } else { li[&g] } };
-        // keep[m * 2 + dir][row index]: each metric and direction in parallel
-        let keep: Vec<Vec<bool>> = (0..2 * nm)
+        // the rows of each node (the rows of a node are together, sorted by the rank of the higher node)
+        let mut start: HashMap<u32, (usize, usize)> = HashMap::new();
+        for (j, r) in rows.iter().enumerate() {
+            start.entry(r.lo).and_modify(|x| x.1 = j + 1).or_insert((j, j + 1));
+        }
+        let unit_edge = |y: u32, z: u32| -> usize {
+            let (a, b) = start[&y];
+            a + rows[a..b].binary_search_by_key(&rank[z as usize], |r| rank[r.hi as usize]).expect("the graph is chordal")
+        };
+        // the perfect customization of the unit, from its highest node down, with the exact distances of the top:
+        // keep[m * 2 + dir][row index]: the edges whose cost is their exact distance; each metric in parallel
+        let keep: Vec<Vec<bool>> = (0..nm)
             .into_par_iter()
-            .map(|md| {
-                let (m, dir) = (md / 2, md % 2);
-                let mut g = top_search[m][dir].clone();
-                g.resize(ntop + k, Vec::new());
-                for r in &rows {
-                    let c = r.cost[m][dir];
-                    if c.is_finite() {
-                        g[loc(r.lo)].push((c, loc(r.hi) as u32));
+            .flat_map_iter(|m| {
+                let mut pu: Vec<f64> = rows.iter().map(|r| r.cost[m][0]).collect();
+                let mut pd: Vec<f64> = rows.iter().map(|r| r.cost[m][1]).collect();
+                for &x in vs.iter().rev() {
+                    let Some(&(a, b)) = start.get(&x) else { continue };
+                    loop {
+                        let mut changed = false;
+                        for i in a..b {
+                            let y = rows[i].hi;
+                            for j in i + 1..b {
+                                let z = rows[j].hi;
+                                // the costs y → z and z → y: an edge of the unit, or of the top
+                                let (yz, zy) = if (y as usize) >= ntop {
+                                    let e = unit_edge(y, z);
+                                    (pu[e], pd[e])
+                                } else {
+                                    let e = top.edge(top.rank[y as usize], top.rank[z as usize]).expect("a top edge");
+                                    (top_exact[m].0[e], top_exact[m].1[e])
+                                };
+                                if pu[j] + zy < pu[i] {
+                                    pu[i] = pu[j] + zy;
+                                    changed = true;
+                                }
+                                if yz + pd[j] < pd[i] {
+                                    pd[i] = yz + pd[j];
+                                    changed = true;
+                                }
+                                if pu[i] + yz < pu[j] {
+                                    pu[j] = pu[i] + yz;
+                                    changed = true;
+                                }
+                                if zy + pd[i] < pd[j] {
+                                    pd[j] = zy + pd[i];
+                                    changed = true;
+                                }
+                            }
+                        }
+                        if !changed {
+                            break;
+                        }
                     }
                 }
-                let red = reduce_from(flat(&g), ntop);
-                rows.iter().map(|r| { let w = loc(r.hi) as u32; red.of(loc(r.lo) as u32).iter().any(|&(_, x)| x == w) }).collect()
+                let ku: Vec<bool> = rows.iter().zip(&pu).map(|(r, &e)| r.cost[m][0].is_finite() && r.cost[m][0] <= e).collect();
+                let kd: Vec<bool> = rows.iter().zip(&pd).map(|(r, &e)| r.cost[m][1].is_finite() && r.cost[m][1] <= e).collect();
+                [ku, kd]
             })
             .collect();
         let mut recs: HashMap<u32, NodeRec> = vs.iter().map(|&v| (v, NodeRec { num: v, rank: rank[v as usize], edge: edge[v as usize], item: item(v), up: Vec::new(), lower: Vec::new() })).collect();
@@ -560,17 +576,19 @@ pub fn build(db: &Path, mode: &str, finest: u8, tz: u8, leaf: usize, xyz: bool, 
             write_node(f, rec).map_err(err)?;
         }
     }
-    // the top nodes: their mask from the top alone (the rows of the units are not witnesses of top arcs)
+    // the top nodes: their mask from the exact distances of the top
     {
-        let red: Vec<[Fast; 2]> = (0..nm).map(|m| [reduce(flat(&top_search[m][0])), reduce(flat(&top_search[m][1]))]).collect();
-        let kept = |m: usize, dir: usize, v: u32, w: u32| red[m][dir].of(v).iter().any(|&(_, x)| x == w);
+        let kept = |m: usize, e: usize, dir: usize| {
+            let (c, x) = if dir == 0 { (top_m[m].up[e], top_exact[m].0[e]) } else { (top_m[m].down[e], top_exact[m].1[e]) };
+            c.is_finite() && c <= x
+        };
         let f = parts.entry(0).or_insert_with(|| BufWriter::new(File::create(part(0)).expect("a file bucket")));
         for v in 0..ntop as u32 {
             let r = top.rank[v as usize];
             let mut rec = NodeRec { num: v, rank: rank[v as usize], edge: edge[v as usize], item: item(v), up: Vec::new(), lower: std::mem::take(&mut top_lower[v as usize]) };
             for e in top.row(r) {
                 let w = top.order[top.up[e] as usize];
-                rec.up.push((w, (0..nm).map(|m| (top_m[m].up[e], top_m[m].down[e], kept(m, 0, v, w), kept(m, 1, v, w), top_via[m][0][e], top_via[m][1][e])).collect()));
+                rec.up.push((w, (0..nm).map(|m| (top_m[m].up[e], top_m[m].down[e], kept(m, e, 0), kept(m, e, 1), top_via[m][0][e], top_via[m][1][e])).collect()));
                 let _ = e;
             }
             // the lower neighbours inside the top
