@@ -11,7 +11,7 @@
 //!
 //! The ranks are the node numbers inside this module; `order` gives the input node of each rank.
 
-use crate::hier::{reduce, Fast};
+use crate::hier::Fast;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -78,13 +78,13 @@ impl Cch {
     }
 
     /// The edge of the ranks a < b.
-    fn edge(&self, a: u32, b: u32) -> Option<usize> {
+    pub(crate) fn edge(&self, a: u32, b: u32) -> Option<usize> {
         let r = self.row(a);
         self.up[r.clone()].binary_search(&b).ok().map(|i| r.start + i)
     }
 
     /// The costs of one metric: `arcs` (u, w, cost) of the input graph (the cheapest cost of a pair counts).
-    /// `reduce_arcs`: then the arc reduction removes the search arcs that these costs do not need.
+    /// `reduce_arcs`: then the mask keeps only the search arcs that these costs need (the perfect customization).
     pub fn customize(&self, arcs: &[(u32, u32, f64)], reduce_arcs: bool) -> Metric<'_> {
         let t0 = std::time::Instant::now();
         let m = self.up.len();
@@ -149,7 +149,26 @@ impl Cch {
         let (fwd, bwd) = (search(&up), search(&down));
         let before = fwd.arc.len() + bwd.arc.len();
         let t_tri = t0.elapsed().as_secs_f64();
-        let (fwd, bwd) = if reduce_arcs { (reduce(fwd), reduce(bwd)) } else { (fwd, bwd) };
+        // the mask: with `reduce_arcs`, only the edges whose cost is their exact distance (the perfect customization)
+        let (fwd, bwd) = if !reduce_arcs {
+            (fwd, bwd)
+        } else {
+            let (pu, pd) = self.perfect(&up, &down);
+            let keep = |cost: &[f64], exact: &[f64]| -> Fast {
+                let mut off = vec![0u32];
+                let mut arc = Vec::new();
+                for a in 0..n as u32 {
+                    for e in self.row(a) {
+                        if cost[e].is_finite() && cost[e] <= exact[e] {
+                            arc.push((cost[e], self.up[e]));
+                        }
+                    }
+                    off.push(arc.len() as u32);
+                }
+                Fast { off, arc }
+            };
+            (keep(&up, &pu), keep(&down, &pd))
+        };
         // the mask of each direction: one bit for each edge, set when the search uses it (the structure stays shared)
         let mask = |g: &Fast| -> Vec<u64> {
             let mut bits = vec![0u64; m.div_ceil(64)];
@@ -165,6 +184,48 @@ impl Cch {
         let kept = fwd.arc.len() + bwd.arc.len();
         let times = (t_tri, t0.elapsed().as_secs_f64() - t_tri);
         Metric { cch: self, up, down, via_up, via_down, keep, before, kept, times }
+    }
+
+    /// The perfect customization: the exact distance of each edge in each direction, from the costs after the
+    /// customization, by the upper and the intermediate triangles, from the highest node down. An edge whose cost is
+    /// above its exact distance is not needed by any search.
+    pub(crate) fn perfect(&self, up: &[f64], down: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let (mut pu, mut pd) = (up.to_vec(), down.to_vec());
+        for x in (0..self.order.len() as u32).rev() {
+            let r = self.row(x);
+            loop {
+                let mut changed = false;
+                for i in r.clone() {
+                    let y = self.up[i];
+                    for j in i + 1..r.end {
+                        let z = self.up[j];
+                        let e = self.edge(y, z).expect("the graph is chordal");
+                        // the edge (x, y) through z (an upper triangle)
+                        if pu[j] + pd[e] < pu[i] {
+                            pu[i] = pu[j] + pd[e];
+                            changed = true;
+                        }
+                        if pu[e] + pd[j] < pd[i] {
+                            pd[i] = pu[e] + pd[j];
+                            changed = true;
+                        }
+                        // the edge (x, z) through y (an intermediate triangle)
+                        if pu[i] + pu[e] < pu[j] {
+                            pu[j] = pu[i] + pu[e];
+                            changed = true;
+                        }
+                        if pd[e] + pd[i] < pd[j] {
+                            pd[j] = pd[e] + pd[i];
+                            changed = true;
+                        }
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+        }
+        (pu, pd)
     }
 
     pub fn max_depth(&self) -> u32 {
